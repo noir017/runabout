@@ -16,6 +16,14 @@ import (
 // 少了它就只会显示一个没有下文的连接失败。
 func (s *Server) Protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// CORS 预检不带 Authorization —— 浏览器规范就不允许它带。
+		// 在这里 401 掉，浏览器侧的 MCP 客户端只会看到一个没有下文的
+		// "unexpected error"，而服务端日志里只有一条 Debug 级的 401，
+		// 极难定位。预检交给下游 transport 处理（它只回 204 + CORS 头，不碰数据）。
+		if r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !s.cfg.Auth.Enabled {
 			next.ServeHTTP(w, mcp.RequestWithPrincipal(r, mcp.Principal{
 				Subject: "anonymous", Method: "disabled",

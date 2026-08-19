@@ -338,6 +338,49 @@ func TestUnauthorizedChallenge(t *testing.T) {
 	}
 }
 
+// TestPreflightNotBehindAuth 钉住一条容易回归的规则：CORS 预检必须绕过鉴权。
+// 浏览器不允许预检携带 Authorization，所以在鉴权中间件里 401 掉它，
+// 浏览器侧的 MCP 客户端只会显示一个没有下文的连接错误。
+func TestPreflightNotBehindAuth(t *testing.T) {
+	h := newHarness(t)
+
+	req, _ := http.NewRequest(http.MethodOptions, h.base+"/mcp", nil)
+	req.Header.Set("Origin", "https://chatgpt.com")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "content-type,authorization")
+	resp, err := h.srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("OPTIONS /mcp 预检应返回 204，实际 %d（鉴权把预检拦了？）", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got == "" {
+		t.Error("预检响应缺少 Access-Control-Allow-Origin")
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Headers"); !strings.Contains(strings.ToLower(got), "authorization") {
+		t.Errorf("预检必须允许 Authorization 头，实际: %q", got)
+	}
+
+	// 公开的 OAuth 端点也要能跨源读：浏览器里的客户端靠它做发现。
+	for _, path := range []string{
+		"/.well-known/oauth-protected-resource",
+		"/.well-known/oauth-authorization-server",
+	} {
+		r, _ := http.NewRequest(http.MethodGet, h.base+path, nil)
+		r.Header.Set("Origin", "https://chatgpt.com")
+		got, err := h.srv.Client().Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got.Body.Close()
+		if got.Header.Get("Access-Control-Allow-Origin") != "*" {
+			t.Errorf("%s 缺少通配 CORS 头，实际: %q", path, got.Header.Get("Access-Control-Allow-Origin"))
+		}
+	}
+}
+
 // TestFullFlow 走通"授权 → initialize → 列工具 → 用工具"的完整链路。
 func TestFullFlow(t *testing.T) {
 	h := newHarness(t)
