@@ -6,12 +6,17 @@ bin/
 *.test
 coverage.out
 
-# 本地配置与状态：含密码哈希、令牌、审计日志，绝不进镜像
-configs/config.yaml
-deploy/config.yaml
+# 本地配置与状态：含密码哈希、令牌、审计日志，绝不进镜像。
+# 用通配后缀是刻意的：手工改配置时留下的 .bak / .old / .orig 一样带着哈希，
+# 只写精确文件名的话它们会被打进 build stage 的层里。
+configs/config.yaml*
+deploy/config.yaml*
 deploy/.env
+deploy/.env.?*
 deploy/workspace/
 *.local.yaml
+*.bak
+*.orig
 data/
 audit.jsonl
 oauth.json
