@@ -410,7 +410,7 @@ func TestFullFlow(t *testing.T) {
 			t.Errorf("工具 %v 缺少描述或 schema", td["name"])
 		}
 	}
-	for _, want := range []string{"shell", "read", "write", "apply_patch", "search", "glob", "list_dir"} {
+	for _, want := range []string{"shell", "read", "apply_patch", "search", "glob", "shell_output", "shell_kill"} {
 		if !names[want] {
 			t.Errorf("工具列表里缺少 %s（实际: %v）", want, names)
 		}

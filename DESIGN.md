@@ -24,7 +24,7 @@ cmd/runabout        CLI：serve / hash-password / gen-token / check-policy
   └── internal/app         装配：把各层拼成一个 http.Handler（Build 可被测试直接调用）
         ├── internal/auth      OAuth 2.1 授权服务器 + Bearer 校验中间件
         ├── internal/mcp       JSON-RPC 消息层、工具注册表、Streamable HTTP 传输
-        ├── internal/tools     10 个工具的实现
+        ├── internal/tools     7 个默认 MCP 工具的实现（另有 3 个保留实现但默认不暴露）
         ├── internal/policy    shell AST 解析、风险规则、路径黑名单、确认令牌
         ├── internal/audit     JSONL 审计日志
         ├── internal/config    配置结构、默认值、校验
