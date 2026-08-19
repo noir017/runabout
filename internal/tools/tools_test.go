@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/noir017/agent-tools-mcp/internal/audit"
@@ -447,5 +448,47 @@ func TestRelativePathsUseDefaultWorkdir(t *testing.T) {
 	out, _ = call(t, &shellTool{d: d}, map[string]any{"command": "cat sub/rel.txt"})
 	if !strings.Contains(out, "内容") {
 		t.Errorf("shell 的相对路径基准应与文件工具一致:\n%s", out)
+	}
+}
+
+// only_new 的语义是"自上一次 only_new 读取之后的新增"，游标必须在锁内推进：
+// 轮询长任务时多个 shell_output 会并发落到同一个 Proc 上。
+func TestProcTakeNewIsIncrementalAndRaceFree(t *testing.T) {
+	p := &Proc{ID: "proc_test", out: newCapWriter(1 << 20)}
+
+	if got := p.TakeNew(); got != "" {
+		t.Fatalf("空进程首次 TakeNew 应为空，得到 %q", got)
+	}
+	p.out.Write([]byte("line 1\nline 2\n"))
+	if got := p.TakeNew(); got != "line 1\nline 2\n" {
+		t.Fatalf("首次增量不对: %q", got)
+	}
+	if got := p.TakeNew(); got != "" {
+		t.Fatalf("没有新输出时应为空，得到 %q", got)
+	}
+	p.out.Write([]byte("line 3\n"))
+	if got := p.TakeNew(); got != "line 3\n" {
+		t.Fatalf("第二次增量应只含新行，得到 %q", got)
+	}
+
+	// 并发读写：-race 下能抓到游标未加锁的情况；同时验证每段输出只被交付一次。
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	seen := 0
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.out.Write([]byte("x\n"))
+			n := len(p.TakeNew())
+			mu.Lock()
+			seen += n
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	seen += len(p.TakeNew())
+	if seen != 16 {
+		t.Fatalf("8 个 goroutine 各写 2 字节，累计交付应为 16，得到 %d", seen)
 	}
 }

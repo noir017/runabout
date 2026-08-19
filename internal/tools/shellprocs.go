@@ -81,12 +81,12 @@ func (t *shellOutputTool) Definition() mcp.ToolDef {
 		Title: "读取后台任务输出",
 		Description: `读取后台进程（shell 的 run_in_background）已捕获的 stdout+stderr。
 
-- only_new=true 只返回上次读取之后新增的部分，适合轮询长任务。
+- only_new=true 只返回上一次带 only_new 的读取之后新增的部分，适合轮询长任务。
 - tail_lines 只看最后 N 行。
 - wait_ms 可以先等一会儿再读（最长 60000 毫秒），省得空轮询。`,
 		InputSchema: schema(map[string]any{
 			"process_id": strProp("shell 返回的后台进程 id"),
-			"only_new":   boolProp("只返回自上次读取以来的新增输出"),
+			"only_new":   boolProp("只返回自上一次带 only_new 的读取以来的新增输出"),
 			"tail_lines": intProp("只返回最后 N 行", 1, 10000),
 			"wait_ms":    intProp("读取前先等待的毫秒数（进程结束会提前返回）", 0, 60000),
 		}, "process_id"),
@@ -107,13 +107,9 @@ func (t *shellOutputTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.C
 		p.Wait(time.Duration(a.WaitMS) * time.Millisecond)
 	}
 
-	full := p.Output()
-	out := full
+	out := p.Output()
 	if a.OnlyNew {
-		if p.cursor <= len(full) {
-			out = full[p.cursor:]
-		}
-		p.cursor = len(full)
+		out = p.TakeNew()
 	}
 	if a.TailLines > 0 {
 		out = tailLines(out, a.TailLines)
