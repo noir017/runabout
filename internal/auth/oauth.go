@@ -110,17 +110,38 @@ func (s *Server) reap() {
 
 // Routes 把 OAuth 相关端点注册到 mux 上。
 func (s *Server) Routes(mux *http.ServeMux) {
-	mux.HandleFunc(PathProtectedResource, s.handleProtectedResource)
+	// 元数据、注册、令牌、吊销这四类是给程序调的公开端点，浏览器里的 MCP
+	// 客户端会跨源直接 fetch，所以必须放开 CORS 并正确回预检。
+	mux.HandleFunc(PathProtectedResource, publicCORS(s.handleProtectedResource))
 	// RFC 9728 规定资源标识带路径时，元数据挂在 /.well-known/... 之后拼上该路径。
-	mux.HandleFunc(PathProtectedResource+"/mcp", s.handleProtectedResource)
-	mux.HandleFunc(PathAuthServerMeta, s.handleAuthServerMeta)
-	mux.HandleFunc(PathAuthServerMeta+"/mcp", s.handleAuthServerMeta)
-	mux.HandleFunc(PathOpenIDConfig, s.handleAuthServerMeta)
-	mux.HandleFunc(PathRegister, s.handleRegister)
+	mux.HandleFunc(PathProtectedResource+"/mcp", publicCORS(s.handleProtectedResource))
+	mux.HandleFunc(PathAuthServerMeta, publicCORS(s.handleAuthServerMeta))
+	mux.HandleFunc(PathAuthServerMeta+"/mcp", publicCORS(s.handleAuthServerMeta))
+	mux.HandleFunc(PathOpenIDConfig, publicCORS(s.handleAuthServerMeta))
+	mux.HandleFunc(PathRegister, publicCORS(s.handleRegister))
+	mux.HandleFunc(PathToken, publicCORS(s.handleToken))
+	mux.HandleFunc(PathRevoke, publicCORS(s.handleRevoke))
+	// authorize/login 是给人看的页面，靠 Cookie 维持登录态，
+	// 刻意不放开跨源——放开等于把登录页暴露给别人的站点去 fetch。
 	mux.HandleFunc(PathAuthorize, s.handleAuthorize)
 	mux.HandleFunc(PathLogin, s.handleLogin)
-	mux.HandleFunc(PathToken, s.handleToken)
-	mux.HandleFunc(PathRevoke, s.handleRevoke)
+}
+
+// publicCORS 给公开端点加上通配 CORS 并短路预检。
+// 用 "*" 而不是回显 Origin 是刻意的：这些端点不靠 Cookie 鉴权，
+// 因此不能也不需要 Allow-Credentials（两者同时出现按规范无效）。
+func publicCORS(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Max-Age", "600")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		h(w, r)
+	}
 }
 
 func (s *Server) base() string { return strings.TrimRight(s.cfg.Server.BaseURL, "/") }
