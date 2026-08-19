@@ -11,3 +11,4 @@ deploy/workspace/
 data/
 audit.jsonl
 oauth.json
+deploy/.env

@@ -22,12 +22,12 @@ type Proc struct {
 	Workdir string
 	Started time.Time
 
-	cmd    *exec.Cmd
-	out    *capWriter
-	done   chan struct{}
-	cursor int // shell_output 已读到的位置
+	cmd  *exec.Cmd
+	out  *capWriter
+	done chan struct{}
 
 	mu       sync.Mutex
+	cursor   int // shell_output 已读到的位置，受 mu 保护
 	finished bool
 	ended    time.Time
 	exitCode int
@@ -137,6 +137,21 @@ func (p *Proc) markDone(exitCode int, err error) {
 
 // Output 返回全部已捕获输出。
 func (p *Proc) Output() string { return p.out.String() }
+
+// TakeNew 返回自上次 TakeNew 以来新增的输出，并推进游标。
+// 游标必须在锁内推进：轮询长任务时多个 shell_output 调用会并发落到同一个 Proc 上。
+func (p *Proc) TakeNew() string {
+	full := p.Output()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cursor > len(full) {
+		// 输出被截断过（capWriter 的头尾裁剪），游标失效，从头给。
+		p.cursor = 0
+	}
+	out := full[p.cursor:]
+	p.cursor = len(full)
+	return out
+}
 
 // Signal 给整个进程组发信号：后台任务常常自己再拉子进程，只杀父进程会留孤儿。
 func (p *Proc) Signal(sig syscall.Signal) error {

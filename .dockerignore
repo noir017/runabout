@@ -1,0 +1,21 @@
+# 构建上下文只需要源码 + 许可文件：镜像里既不该有本地状态，
+# 也别为无关文件浪费传输（这台服务器上行只有 0.08Mbps）。
+.git
+.gitignore
+bin/
+*.test
+coverage.out
+
+# 本地配置与状态：含密码哈希、令牌、审计日志，绝不进镜像
+configs/config.yaml
+deploy/config.yaml
+deploy/.env
+deploy/workspace/
+*.local.yaml
+data/
+audit.jsonl
+oauth.json
+
+# 文档不参与构建（LICENSE/NOTICE 例外，要随镜像分发）
+README.md
+DESIGN.md

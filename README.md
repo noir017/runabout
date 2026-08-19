@@ -141,8 +141,19 @@ curl -s https://你的域名/mcp \
 ## 部署形态
 
 - **Docker**：`deploy/docker-compose.yml`。镜像基于 debian-slim，预装 git、ripgrep、fd、jq、python3、
-  build-essential 等——这个服务的价值就在于工具齐全，所以刻意不用 scratch。默认以 uid 10001 的
-  `agent` 用户运行，不是 root。
+  build-essential 等——这个服务的价值就在于工具齐全，所以刻意不用 scratch。amd64 / arm64 都能直接构建。
+
+  ```bash
+  cd deploy
+  cp .env.example .env                 # 至少填 ATM_BASE_URL；AGENT_UID 设成宿主机工作区的属主
+  cp ../configs/config.example.yaml config.yaml
+  docker compose up -d --build
+  ```
+
+  默认以非 root 的 `agent` 用户运行（uid 由 `AGENT_UID` 决定），并给了免密 sudo，好让助理自己
+  `apt install` 缺的工具——容器内提权等于容器内 root，边界仍是容器本身。不想要就把 `.env` 里的
+  `SUDO_NOPASSWD` 改成 `false` 重建，此时可以顺手打开 compose 里注释着的 `no-new-privileges`
+  （开了免密 sudo 就不能开它，否则 sudo 直接失效）。
 - **裸机**：`deploy/agent-tools-mcp.service`。建议专门建一个用户跑，需要提权的操作通过 sudoers 精确授予。
 
 > 跑这个服务的身份，就是 agent 拿到的身份。默认给 root 等于把整台机器交出去。
