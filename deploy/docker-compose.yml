@@ -47,6 +47,13 @@ services:
       #   - /srv/notes:/srv/notes
       - ./workspace:/workspace
 
+    networks:
+      # 业务网络（compose 自建），留给以后可能的 sidecar。
+      - default
+      # 入站网络：由反代/隧道那边提供，本服务挂进去让它能按容器名访问。
+      # 入口不该反过来加入业务网络——它是共享的前门，服务挂上来才对。
+      - ingress
+
     # 单核机器上不设硬性 cpu 上限（会拖慢正常的编译/测试），
     # 改用相对权重：只在争抢时让它退让给同机的其它服务。
     cpu_shares: 512
@@ -72,21 +79,30 @@ services:
         max-size: "20m"
         max-file: "5"
 
-  # 可选：Cloudflare Tunnel 出公网，不必开入站端口也不必自己搞证书。
-  # token 从 Cloudflare Zero Trust 控制台拿，Public hostname 指向 http://chatgpt-tools-mcp:8484。
+  # 可选：把隧道也交给这个 compose 管（适合"这条隧道只服务本项目"的场景）。
+  # 已经有一个公用 cloudflared 在跑就别开，按下面 networks 的说明把本服务挂进它的网络即可。
   # cloudflared:
   #   image: cloudflare/cloudflared:latest
   #   container_name: chatgpt-tools-mcp-cloudflared
   #   restart: unless-stopped
   #   command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN:?}
+  #   networks: [ingress]
   #   depends_on: [mcp]
 
 volumes:
   mcp-data:
 
-# 固定网络名，方便外部已有的 cloudflared 容器接进来：
-#   docker network connect chatgpt-tools-mcp <cloudflared 容器名>
-# 接进来后隧道的 Service 填 http://chatgpt-tools-mcp:8484。
 networks:
   default:
     name: chatgpt-tools-mcp
+
+  # 入站网络，由隧道/反代那侧持有，本项目只是挂进去，所以声明为 external。
+  # 首次部署前先建好，并把入口容器接进来：
+  #   docker network create cloudflared
+  #   docker network connect cloudflared <cloudflared 容器名>
+  # 然后隧道的 Public hostname → Service 填 http://chatgpt-tools-mcp:8484
+  # （不能填 127.0.0.1:8484 —— 那是 cloudflared 容器自己的回环，必然 502）。
+  # 不用隧道/反代的话，把这里和 services.mcp.networks 里的 ingress 一起删掉。
+  ingress:
+    external: true
+    name: ${INGRESS_NETWORK:-cloudflared}
