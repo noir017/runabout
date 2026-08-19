@@ -1,8 +1,8 @@
-# agent-tools-mcp 配置示例
+# runabout 配置示例
 #
 # 所有字段都有默认值，只写要改的即可。环境变量优先级高于本文件：
-#   ATM_LISTEN / ATM_BASE_URL / ATM_DATA_DIR / ATM_USER / ATM_PASSWORD_HASH
-#   ATM_STATIC_TOKEN / ATM_AUTH_DISABLED / ATM_LOG_LEVEL / ATM_LOG_FORMAT
+#   RB_LISTEN / RB_BASE_URL / RB_DATA_DIR / RB_USER / RB_PASSWORD_HASH
+#   RB_STATIC_TOKEN / RB_AUTH_DISABLED / RB_LOG_LEVEL / RB_LOG_FORMAT
 
 server:
   # 只监听回环，HTTPS 由外层反代（Cloudflare Tunnel / Nginx / Caddy）提供。
@@ -28,16 +28,16 @@ server:
   # 对应源码的获取地址，展示在服务根页面与 /healthz。
   # 本项目按 AGPL-3.0 授权：改了代码又对外提供服务的话，第 13 条要求让使用者
   # 能拿到你修改后的源码，此时请把这里指向你自己的仓库。
-  source_url: "https://github.com/noir017/agent-tools-mcp"
+  source_url: "https://github.com/noir017/runabout"
 
   # OAuth 客户端注册信息与令牌存放处。该目录被自动加入文件工具黑名单，
   # 免得 agent 自己去改令牌库。
-  data_dir: "/var/lib/agent-tools-mcp"
+  data_dir: "/var/lib/runabout"
 
 auth:
   enabled: true
 
-  # 登录账号。password_hash 用 `agent-tools-mcp hash-password` 生成。
+  # 登录账号。password_hash 用 `runabout hash-password` 生成。
   # 这个口令等价于服务器 shell 权限，别用弱密码。
   users:
     - username: "noir017"
@@ -55,7 +55,7 @@ auth:
   session_cookie_ttl: 12h
 
   # 绕过 OAuth 的长期令牌，方便 curl 自检或别的 agent 直连。
-  # 用 `agent-tools-mcp gen-token` 生成。不需要就留空。
+  # 用 `runabout gen-token` 生成。不需要就留空。
   static_tokens: []
   #  - name: "curl-debug"
   #    token: "……"
@@ -122,7 +122,7 @@ policy:
     - "~/.kube/config"
     - "~/.netrc"
 
-  # 按 id 关掉内置 shell 规则（用 `agent-tools-mcp check-policy` 看 id）。
+  # 按 id 关掉内置 shell 规则（用 `runabout check-policy` 看 id）。
   disabled_shell_rules: []
 
   # 把内置的 deny 规则降级为"可二次确认"。例如你确实需要偶尔跑 rm -rf /etc：

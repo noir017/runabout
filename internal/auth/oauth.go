@@ -14,9 +14,9 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/noir017/agent-tools-mcp/internal/audit"
-	"github.com/noir017/agent-tools-mcp/internal/config"
-	"github.com/noir017/agent-tools-mcp/internal/idgen"
+	"github.com/noir017/runabout/internal/audit"
+	"github.com/noir017/runabout/internal/config"
+	"github.com/noir017/runabout/internal/idgen"
 )
 
 // 端点路径。改动这些会让已接入的客户端需要重新走一次发现流程。
@@ -30,7 +30,7 @@ const (
 	PathRevoke            = "/oauth/revoke"
 	PathLogin             = "/oauth/login"
 
-	sessionCookie = "atm_session"
+	sessionCookie = "runabout_session"
 	// ScopeDefault 是本服务唯一的作用域：拿到即拥有全部工具。
 	// 细粒度 scope 留给以后真有需要时再加，现在多一层只会让接入更容易出错。
 	ScopeDefault = "mcp"
@@ -77,7 +77,7 @@ func New(cfg *config.Config, store *Store, aud *audit.Logger, log *slog.Logger) 
 		}
 		if !strings.HasPrefix(u.PasswordHash, "$2") {
 			return nil, fmt.Errorf("auth.users[%d] 的 password_hash 不是 bcrypt 格式；"+
-				"用 `agent-tools-mcp hash-password` 生成", i)
+				"用 `runabout hash-password` 生成", i)
 		}
 	}
 	s := &Server{
@@ -133,7 +133,7 @@ func (s *Server) handleProtectedResource(w http.ResponseWriter, r *http.Request)
 		"authorization_servers":                 []string{s.base()},
 		"scopes_supported":                      []string{ScopeDefault},
 		"bearer_methods_supported":              []string{"header"},
-		"resource_name":                         "agent-tools-mcp",
+		"resource_name":                         "runabout",
 		"resource_documentation":                s.base() + "/",
 		"authorization_details_types_supported": []string{},
 	})

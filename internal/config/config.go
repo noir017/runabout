@@ -1,4 +1,4 @@
-// Package config 定义 agent-tools-mcp 的配置结构、默认值与加载逻辑。
+// Package config 定义 runabout 的配置结构、默认值与加载逻辑。
 package config
 
 import (
@@ -13,7 +13,7 @@ import (
 )
 
 // DefaultSourceURL 是上游仓库地址，用于满足 AGPL 第 13 条的源码提供义务。
-const DefaultSourceURL = "https://github.com/noir017/agent-tools-mcp"
+const DefaultSourceURL = "https://github.com/noir017/runabout"
 
 type Config struct {
 	// normalized 记录是否已跑过 Normalize，避免派生字段被重复追加。
@@ -163,7 +163,7 @@ func Default() *Config {
 			WriteTimeout:   0,
 			SessionTTL:     2 * time.Hour,
 			StrictSessions: false,
-			DataDir:        filepath.Join(home, ".local", "share", "agent-tools-mcp"),
+			DataDir:        filepath.Join(home, ".local", "share", "runabout"),
 			SourceURL:      DefaultSourceURL,
 		},
 		Auth: Auth{
@@ -241,22 +241,22 @@ func Load(path string) (*Config, error) {
 
 // applyEnv 允许用环境变量覆盖最常改的几项，方便容器部署。
 func applyEnv(cfg *Config) {
-	if v := os.Getenv("ATM_LISTEN"); v != "" {
+	if v := os.Getenv("RB_LISTEN"); v != "" {
 		cfg.Server.Listen = v
 	}
-	if v := os.Getenv("ATM_BASE_URL"); v != "" {
+	if v := os.Getenv("RB_BASE_URL"); v != "" {
 		cfg.Server.BaseURL = v
 	}
-	if v := os.Getenv("ATM_DATA_DIR"); v != "" {
+	if v := os.Getenv("RB_DATA_DIR"); v != "" {
 		cfg.Server.DataDir = v
 	}
-	if v := os.Getenv("ATM_AUTH_DISABLED"); v == "1" || v == "true" {
+	if v := os.Getenv("RB_AUTH_DISABLED"); v == "1" || v == "true" {
 		cfg.Auth.Enabled = false
 	}
-	if u, p := os.Getenv("ATM_USER"), os.Getenv("ATM_PASSWORD_HASH"); u != "" && p != "" {
+	if u, p := os.Getenv("RB_USER"), os.Getenv("RB_PASSWORD_HASH"); u != "" && p != "" {
 		cfg.Auth.Users = append(cfg.Auth.Users, User{Username: u, PasswordHash: p})
 	}
-	if v := os.Getenv("ATM_STATIC_TOKEN"); v != "" {
+	if v := os.Getenv("RB_STATIC_TOKEN"); v != "" {
 		cfg.Auth.StaticTokens = append(cfg.Auth.StaticTokens, StaticToken{Name: "env", Token: v})
 	}
 }
@@ -285,7 +285,7 @@ func (c *Config) Normalize() error {
 	c.Auth.Issuer = strings.TrimRight(c.Auth.Issuer, "/")
 	if c.Auth.Enabled && len(c.Auth.Users) == 0 && len(c.Auth.StaticTokens) == 0 {
 		return fmt.Errorf("auth.enabled 为 true 时必须配置至少一个 auth.users 或 auth.static_tokens；" +
-			"用 `agent-tools-mcp hash-password` 生成 password_hash")
+			"用 `runabout hash-password` 生成 password_hash")
 	}
 	if c.Tools.Shell.Path == "" {
 		c.Tools.Shell.Path = "/bin/bash"

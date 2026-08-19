@@ -8,8 +8,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/noir017/agent-tools-mcp/internal/config"
-	"github.com/noir017/agent-tools-mcp/internal/globmatch"
+	"github.com/noir017/runabout/internal/config"
+	"github.com/noir017/runabout/internal/globmatch"
 )
 
 // Finding 是一条命中的风险判定。

@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/noir017/agent-tools-mcp/internal/idgen"
+	"github.com/noir017/runabout/internal/idgen"
 )
 
 const (

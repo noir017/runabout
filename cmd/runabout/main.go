@@ -1,4 +1,4 @@
-// agent-tools-mcp 把一台 Linux 机器的基础操作能力（shell、文件读写、检索）
+// runabout 把一台 Linux 机器的基础操作能力（shell、文件读写、检索）
 // 通过 MCP over Streamable HTTP 暴露出去，自带 OAuth 2.1 授权服务器，
 // 可直接作为 ChatGPT 的自定义连接器使用。
 //
@@ -20,24 +20,24 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
 
-	"github.com/noir017/agent-tools-mcp/internal/app"
-	"github.com/noir017/agent-tools-mcp/internal/config"
-	"github.com/noir017/agent-tools-mcp/internal/idgen"
-	"github.com/noir017/agent-tools-mcp/internal/policy"
+	"github.com/noir017/runabout/internal/app"
+	"github.com/noir017/runabout/internal/config"
+	"github.com/noir017/runabout/internal/idgen"
+	"github.com/noir017/runabout/internal/policy"
 )
 
-const usage = `agent-tools-mcp —— 给 agent 用的服务器基础工具 MCP 服务
+const usage = `runabout —— 给 agent 用的服务器基础工具 MCP 服务
 
 用法：
-  agent-tools-mcp serve [-c 配置文件]      启动服务（默认子命令）
-  agent-tools-mcp hash-password [密码]     生成 bcrypt 密码哈希，填到 auth.users
-  agent-tools-mcp gen-token                生成一个随机静态令牌，填到 auth.static_tokens
-  agent-tools-mcp check-policy '命令'      查看某条 shell 命令会被策略如何处理
-  agent-tools-mcp version                  打印版本与许可信息
+  runabout serve [-c 配置文件]      启动服务（默认子命令）
+  runabout hash-password [密码]     生成 bcrypt 密码哈希，填到 auth.users
+  runabout gen-token                生成一个随机静态令牌，填到 auth.static_tokens
+  runabout check-policy '命令'      查看某条 shell 命令会被策略如何处理
+  runabout version                  打印版本与许可信息
 
 环境变量（覆盖配置文件）：
-  ATM_LISTEN, ATM_BASE_URL, ATM_DATA_DIR, ATM_USER, ATM_PASSWORD_HASH,
-  ATM_STATIC_TOKEN, ATM_AUTH_DISABLED, ATM_LOG_LEVEL, ATM_LOG_FORMAT
+  RB_LISTEN, RB_BASE_URL, RB_DATA_DIR, RB_USER, RB_PASSWORD_HASH,
+  RB_STATIC_TOKEN, RB_AUTH_DISABLED, RB_LOG_LEVEL, RB_LOG_FORMAT
 `
 
 func main() {
@@ -63,7 +63,7 @@ func run(args []string) error {
 	case "check-policy":
 		return cmdCheckPolicy(args)
 	case "version":
-		fmt.Printf("agent-tools-mcp %s\n", app.Version)
+		fmt.Printf("runabout %s\n", app.Version)
 		fmt.Println("Copyright (C) 2026 noir017")
 		fmt.Println("License AGPL-3.0-or-later: GNU AGPL version 3 or later <https://gnu.org/licenses/agpl.html>")
 		fmt.Println("源码: " + config.DefaultSourceURL)
@@ -84,10 +84,10 @@ func cmdServe(args []string) error {
 		return err
 	}
 	if *cfgPath == "" {
-		if p := os.Getenv("ATM_CONFIG"); p != "" {
+		if p := os.Getenv("RB_CONFIG"); p != "" {
 			*cfgPath = p
-		} else if _, err := os.Stat("/etc/agent-tools-mcp/config.yaml"); err == nil {
-			*cfgPath = "/etc/agent-tools-mcp/config.yaml"
+		} else if _, err := os.Stat("/etc/runabout/config.yaml"); err == nil {
+			*cfgPath = "/etc/runabout/config.yaml"
 		}
 	}
 	return app.Run(*cfgPath)
@@ -141,7 +141,7 @@ func cmdCheckPolicy(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return errors.New("用法: agent-tools-mcp check-policy '要检查的命令'")
+		return errors.New("用法: runabout check-policy '要检查的命令'")
 	}
 	command := strings.Join(rest, " ")
 
@@ -154,7 +154,7 @@ func cmdCheckPolicy(args []string) error {
 		}
 		cfg = loaded
 	}
-	guard, err := policy.NewShellGuard(cfg.Policy, []string{"agent-tools-mcp"})
+	guard, err := policy.NewShellGuard(cfg.Policy, []string{"runabout"})
 	if err != nil {
 		return err
 	}

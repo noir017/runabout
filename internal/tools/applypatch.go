@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/noir017/agent-tools-mcp/internal/mcp"
+	"github.com/noir017/runabout/internal/mcp"
 )
 
 type applyPatchTool struct{ d *Deps }

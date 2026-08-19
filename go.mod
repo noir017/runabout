@@ -1,4 +1,4 @@
-module github.com/noir017/agent-tools-mcp
+module github.com/noir017/runabout
 
 go 1.25.0
 

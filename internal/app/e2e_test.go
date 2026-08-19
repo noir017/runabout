@@ -18,8 +18,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/noir017/agent-tools-mcp/internal/app"
-	"github.com/noir017/agent-tools-mcp/internal/config"
+	"github.com/noir017/runabout/internal/app"
+	"github.com/noir017/runabout/internal/config"
 )
 
 const testPassword = "correct-horse-battery"

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/noir017/agent-tools-mcp/internal/idgen"
+	"github.com/noir017/runabout/internal/idgen"
 )
 
 // ConfirmStore 保管危险操作的一次性确认令牌。

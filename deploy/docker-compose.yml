@@ -1,13 +1,13 @@
-# agent-tools-mcp 的 Docker 部署。
+# runabout 的 Docker 部署。
 #
 #   cd deploy
-#   cp .env.example .env && $EDITOR .env          # 至少填 ATM_BASE_URL
+#   cp .env.example .env && $EDITOR .env          # 至少填 RB_BASE_URL
 #   cp ../configs/config.example.yaml config.yaml && $EDITOR config.yaml
 #   docker compose up -d --build
 #
 # .env 与 config.yaml 都不入库（含域名、密码哈希、令牌）。
 
-name: chatgpt-tools-mcp
+name: runabout
 
 services:
   mcp:
@@ -19,8 +19,8 @@ services:
         AGENT_UID: ${AGENT_UID:-10001}
         AGENT_GID: ${AGENT_GID:-10001}
         SUDO_NOPASSWD: ${SUDO_NOPASSWD:-true}
-    image: chatgpt-tools-mcp:${VERSION:-0.1.0}
-    container_name: chatgpt-tools-mcp
+    image: runabout:${VERSION:-0.1.0}
+    container_name: runabout
     hostname: mcp
     restart: unless-stopped
 
@@ -33,16 +33,16 @@ services:
     environment:
       # 必填。必须与 ChatGPT 里填的连接器地址逐字一致（scheme + 主机名，无尾斜杠），
       # OAuth 元数据、回调校验、资源标识全以它为准，写错了整条授权链路都不通。
-      ATM_BASE_URL: ${ATM_BASE_URL:?请在 deploy/.env 里填 ATM_BASE_URL，例如 https://mcp.example.com}
-      ATM_LOG_LEVEL: ${ATM_LOG_LEVEL:-info}
-      ATM_LOG_FORMAT: ${ATM_LOG_FORMAT:-json}
+      RB_BASE_URL: ${RB_BASE_URL:?请在 deploy/.env 里填 RB_BASE_URL，例如 https://mcp.example.com}
+      RB_LOG_LEVEL: ${RB_LOG_LEVEL:-info}
+      RB_LOG_FORMAT: ${RB_LOG_FORMAT:-json}
       TZ: ${TZ:-Asia/Shanghai}
 
     volumes:
-      - ./config.yaml:/etc/agent-tools-mcp/config.yaml:ro
+      - ./config.yaml:/etc/runabout/config.yaml:ro
       # OAuth 客户端注册表、令牌库、审计日志。别用 bind mount 挂到工作区里面，
       # 那等于把令牌库放在 agent 自己能写的地方。
-      - mcp-data:/var/lib/agent-tools-mcp
+      - mcp-data:/var/lib/runabout
       # agent 的工作区。想让它管别的目录就在这里继续挂，例如：
       #   - /srv/notes:/srv/notes
       - ./workspace:/workspace
@@ -83,7 +83,7 @@ services:
   # 已经有一个公用 cloudflared 在跑就别开，按下面 networks 的说明把本服务挂进它的网络即可。
   # cloudflared:
   #   image: cloudflare/cloudflared:latest
-  #   container_name: chatgpt-tools-mcp-cloudflared
+  #   container_name: runabout-cloudflared
   #   restart: unless-stopped
   #   command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN:?}
   #   networks: [ingress]
@@ -93,14 +93,15 @@ volumes:
   mcp-data:
 
 networks:
+  # 业务网络。名字刻意与容器名（runabout）区分开，免得看 docker ps / network ls 时错认。
   default:
-    name: chatgpt-tools-mcp
+    name: runabout-internal
 
   # 入站网络，由隧道/反代那侧持有，本项目只是挂进去，所以声明为 external。
   # 首次部署前先建好，并把入口容器接进来：
   #   docker network create cloudflared
   #   docker network connect cloudflared <cloudflared 容器名>
-  # 然后隧道的 Public hostname → Service 填 http://chatgpt-tools-mcp:8484
+  # 然后隧道的 Public hostname → Service 填 http://runabout:8484
   # （不能填 127.0.0.1:8484 —— 那是 cloudflared 容器自己的回环，必然 502）。
   # 不用隧道/反代的话，把这里和 services.mcp.networks 里的 ingress 一起删掉。
   ingress:

@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/noir017/agent-tools-mcp/internal/idgen"
+	"github.com/noir017/runabout/internal/idgen"
 )
 
 // Client 是一个已注册的 OAuth 客户端。
