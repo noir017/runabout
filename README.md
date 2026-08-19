@@ -1,112 +1,138 @@
 # runabout
 
-> The one who runs up and down.
+> A small, self-hosted MCP gateway for giving agents controlled access to a Linux machine.
 
 [English](README.md) · [中文](README.zh.md)
 
-runabout is an MCP server that exposes a Linux machine to agents that speak remote MCP: shell, files, search, and directory listing, behind an OAuth 2.1 authorization server over Streamable HTTP.
+runabout turns a Linux server into a **remote MCP endpoint** that agents such as ChatGPT and Claude Code can use over HTTPS. It combines Streamable HTTP, OAuth 2.1, a small tool surface, command policy, path guards, confirmation tokens, and an audit log in one self-hosted binary.
 
-It was built so **ChatGPT on the web** can reach a personal server through a custom connector. Once connected, the chat is no longer limited to whatever you paste in — it can inspect the box, edit config, run deploys, and read logs, with policy intercepts and an audit trail on every call.
+The goal is deliberately simple: **let an agent operate a server without turning the entire server into an uncontrolled shell.**
 
+```text
+ChatGPT / Claude Code / other MCP client
+                    │
+                    │ HTTPS + OAuth 2.1
+                    ▼
+          reverse proxy / tunnel
+                    │
+                    ▼
+                 runabout
+          ┌─────────┼─────────┐
+          │ policy  │  audit  │
+          └─────────┼─────────┘
+                    │
+                    ▼
+                Linux host
 ```
-ChatGPT  ──HTTPS──>  reverse proxy / tunnel  ──>  runabout  ──>  this machine
-                (OAuth 2.1 + PKCE)                    (policy + audit)
-```
 
-The same endpoint works for Claude Code (`claude mcp add --transport http`) and any other client that supports remote MCP plus OAuth. Client registration (RFC 7591), authorization-code + PKCE, token issue and rotation are all handled locally. There is no external IdP.
+## Why runabout?
 
-## What it is for
+Most remote MCP servers expose an application API. runabout exposes the **machine itself**, but keeps the interface intentionally narrow.
 
-ChatGPT's custom connectors can only talk to a **remote HTTPS MCP** server. A homelab, a VPS, or the box under your desk is none of those things until something in front of it speaks that protocol. runabout is that something: listen on loopback, terminate TLS at a tunnel or reverse proxy, and let the model use the process identity you chose.
+Typical uses:
 
-Typical setups:
+- **Server operations** — inspect services, logs, processes, packages, network state, and system configuration.
+- **Development** — inspect a repository, search code, edit files, run tests, and build projects.
+- **Deployment** — pull code, build images, restart services, and diagnose failed deployments.
+- **Homelab / self-hosting** — operate a Docker host, NAS, VPS, or other Linux machine from an agent.
+- **Chat-based administration** — connect ChatGPT to a private server without exposing SSH directly to the Internet.
 
-- **Personal ops assistant.** Ask ChatGPT to check `systemctl`, tail a log, restart a unit, or apply a config change on the machine you already trust.
-- **Homelab / self-hosted stack.** Point it at the host (or a container with the right mounts) that runs your compose projects, notes, or git checkouts.
-- **Deploy from chat.** Have the model pull, build, and restart services you would otherwise SSH in for.
-- **Other agents on the same pipe.** Use a static bearer token for curl, CI, or a local coding agent that already knows MCP, without going through the ChatGPT UI.
+The important security boundary is the process identity. If runabout runs as `root`, the agent effectively has root access. Prefer a dedicated user, container, filesystem mounts, and narrowly scoped sudo rules.
 
-The process identity *is* the agent's identity. Running as root hands over the machine. Prefer a dedicated user, a container, and mounts that only cover what the assistant should touch.
+## Seven core tools
+
+The default MCP surface is intentionally limited to **7 tools**. Some older implementations still exist in the source tree, but they are not exposed by default.
+
+| Tool | Purpose |
+|---|---|
+| `shell` | Run a Bash command in the configured environment; supports foreground and background jobs. |
+| `shell_output` | Read captured stdout/stderr from a background job. |
+| `shell_kill` | Send a signal to a background job and terminate it. |
+| `read` | Read files, with line numbers and bounded output. |
+| `apply_patch` | Make precise, context-aware file changes without replacing an entire file. |
+| `search` | Search file contents using regular expressions. |
+| `glob` | Find files by glob pattern, with bounded results. |
+
+This split is intentional:
+
+- `shell` handles actions that are inherently command-oriented.
+- `read` + `apply_patch` provide a safer file-editing workflow than an unrestricted file writer.
+- `search` + `glob` give the agent codebase navigation without adding separate directory/listing tools.
+- `shell_output` + `shell_kill` complete the lifecycle for long-running commands.
+
+The result is a small tool vocabulary that is easier for models to choose from and easier for operators to audit.
+
+## Security model
+
+runabout is not a sandbox. It is a **policy and access-control layer around a real Linux process**.
+
+Security comes from several layers:
+
+1. **OAuth 2.1 + PKCE** protects the remote MCP endpoint.
+2. **Bearer authentication** can be used for static-token clients and automation.
+3. **Shell policy** can deny or require confirmation for risky commands.
+4. **Path guards** can deny reads/writes to selected paths for file tools.
+5. **Confirmation tokens** allow an agent to stop and request approval before a risky action.
+6. **Audit logging** records tool calls for later inspection.
+7. **OS/container permissions** remain the final boundary.
+
+Do not treat runabout's policy as a replacement for Linux permissions. A process that can run unrestricted `sudo` can usually bypass application-level restrictions.
 
 ## Requirements
 
-- Go **1.25+** to build from source
-- **Linux** only (process-group signals)
-- A public **HTTPS** URL for ChatGPT (the binary itself serves plain HTTP on loopback)
+- Linux
+- Go **1.25+** when building from source
+- A public **HTTPS** origin when connecting from ChatGPT or another remote MCP client
+- A reverse proxy or tunnel is recommended; runabout itself normally listens on loopback over plain HTTP
 
-## Build
+## Quick start
+
+### Build
 
 ```bash
-make build     # writes bin/runabout
-make test      # unit + e2e
-make docker    # image with git, ripgrep, jq, python, compilers, …
+make build
+make test
 ```
 
-`make docker` tags `runabout:$(git describe …)`. amd64 and arm64 both build; the image is debian-slim on purpose so the agent has a usable userspace.
+The binary is written to `bin/runabout`.
 
-Other targets: `make fmt`, `make vet`, `make check` (fmt + vet + test), `make test-policy`, `make clean`.
-
-## Deploy
-
-The service listens on `127.0.0.1:8484` by default. HTTPS, certificates, and the public hostname belong to the layer in front of it. `server.base_url` must be that public origin, **byte-for-byte** the same as the URL you give ChatGPT — OAuth metadata and redirect checks all key off it.
-
-### 1. Config and password
+### Configure authentication
 
 ```bash
 cp configs/config.example.yaml configs/config.yaml
-./bin/runabout hash-password          # interactive; prints a bcrypt hash
+./bin/runabout hash-password
 ```
 
-Put the hash in `auth.users[0].password_hash` and set `server.base_url` to `https://your.domain` (no trailing slash). That password is equivalent to shell on this host; do not use a weak one.
+Put the generated bcrypt hash in `auth.users[0].password_hash` and set:
 
-Every field has a default. Only write what you change. Environment variables override the file: `RB_LISTEN`, `RB_BASE_URL`, `RB_DATA_DIR`, `RB_USER`, `RB_PASSWORD_HASH`, `RB_STATIC_TOKEN`, `RB_AUTH_DISABLED`, `RB_LOG_LEVEL`, `RB_LOG_FORMAT`. `RB_CONFIG` selects the YAML path if `-c` is omitted (`/etc/runabout/config.yaml` is also tried).
+```yaml
+server:
+  base_url: "https://runabout.example.com"
+```
 
-### 2. Docker
+`server.base_url` must exactly match the public origin used by the MCP client. OAuth metadata and redirect validation depend on it.
+
+### Start
 
 ```bash
-cd deploy
-cp .env.example .env                  # at least RB_BASE_URL; AGENT_UID = workspace owner on the host
-cp ../configs/config.example.yaml config.yaml
-docker compose up -d --build
+./bin/runabout serve -c configs/config.yaml
 ```
 
-`.env` and `config.yaml` are gitignored (domain, password hash, tokens).
+The default listener is `127.0.0.1:8484`.
 
-The container runs as non-root `agent`. `AGENT_UID` / `AGENT_GID` should match the owner of bind-mounted workspace files. Passwordless sudo is on by default so the assistant can `apt install` missing tools — inside the container that is root; the boundary is still the container. Set `SUDO_NOPASSWD=false` and rebuild to drop it, then you can enable the commented `no-new-privileges` in compose (that option and passwordless sudo cannot be used together).
+## Expose it over HTTPS
 
-Compose expects an external ingress network (default name `cloudflared`) so a tunnel or reverse proxy can reach the container by name. Create it once:
+Keep runabout private and put TLS at a tunnel or reverse proxy.
 
-```bash
-docker network create cloudflared
-docker network connect cloudflared <cloudflared-container>
-```
-
-Point the tunnel's public hostname at `http://runabout:8484`, not `127.0.0.1:8484` (that loopback is the *tunnel* container). If you are not using a shared ingress network, remove `ingress` from both `services.mcp.networks` and the `networks:` block.
-
-OAuth state and audit logs live in the `mcp-data` volume (`/var/lib/runabout`). Do not bind-mount that directory into the workspace — the agent must not be able to rewrite the token store.
-
-### 3. Bare metal
-
-`deploy/runabout.service` is a systemd unit. Install the binary to `/usr/local/bin/runabout`, the config to `/etc/runabout/config.yaml`, create a dedicated `agent` user, then:
-
-```bash
-systemctl daemon-reload
-systemctl enable --now runabout
-```
-
-Grant extra privileges through sudoers, not by running the unit as root. The unit sets `NoNewPrivileges=true`; do not turn on `ProtectHome` / `ProtectSystem=strict` or the assistant cannot do its job.
-
-### 4. Public HTTPS
-
-ChatGPT will only connect to HTTPS.
-
-**Cloudflare Tunnel** (no open port, no local cert):
+### Cloudflare Tunnel
 
 ```bash
 cloudflared tunnel --url http://127.0.0.1:8484
 ```
 
-**Nginx** (disable buffering for SSE; raise the read timeout for long jobs):
+Configure the public hostname to forward to `http://127.0.0.1:8484` and use that HTTPS origin as `server.base_url`.
+
+### Nginx
 
 ```nginx
 location / {
@@ -119,79 +145,123 @@ location / {
 }
 ```
 
-## Use
+`proxy_buffering off` and a long read timeout are important for Streamable HTTP and long-running commands.
+
+## Docker
+
+The repository includes a Docker Compose deployment.
 
 ```bash
-./bin/runabout serve -c configs/config.yaml
+cd deploy
+cp .env.example .env
+cp ../configs/config.example.yaml config.yaml
+docker compose up -d --build
 ```
 
-Open `https://your.domain/` for a short landing page (MCP URL, source link, a curl snippet).
+Set at least `RB_BASE_URL` in `.env`. The container runs as the non-root `agent` user by default.
 
-### Clients
+When bind-mounting a workspace, set `AGENT_UID` / `AGENT_GID` to match the owner of the files on the host.
 
-Give the client `https://your.domain/mcp` and select OAuth. Dynamic registration is on by default (`auth.allow_dynamic_registration`); ChatGPT depends on it. Set `auth.registration_token` if you want `/oauth/register` to require a bearer token.
+The container intentionally includes a useful Linux userspace for agent operations. If passwordless sudo is enabled, remember that it is effectively root **inside the container**. Keep the container boundary meaningful by limiting mounts and capabilities.
 
-Verified shapes:
+OAuth state and audit data live in the `mcp-data` volume. Do not expose that volume to the agent's workspace.
 
-- ChatGPT custom connector (developer mode)
-- Claude Code: `claude mcp add --transport http`
-- Anything else that speaks remote MCP + OAuth
+## Bare-metal systemd
 
-For curl or a non-OAuth agent, add an entry under `auth.static_tokens` (`runabout gen-token` generates one) and send `Authorization: Bearer …`.
+`deploy/runabout.service` provides a systemd unit. A typical installation is:
 
-Smoke:
+```text
+/usr/local/bin/runabout
+/etc/runabout/config.yaml
+```
+
+Then:
 
 ```bash
-./skills/runabout-deploy/smoke.sh https://your.domain [static-token]
+systemctl daemon-reload
+systemctl enable --now runabout
 ```
 
-Walks every step a client takes on connect — liveness, OAuth metadata, the 401 challenge,
-the CORS preflight, the MCP handshake, `tools/list` — and exits non-zero on any failure.
-Needs only curl, grep and sed. The two quick checks by hand:
+Run the service as a dedicated user. Grant additional privileges through sudoers rather than running runabout itself as root.
+
+## Connect an MCP client
+
+The MCP endpoint is:
+
+```text
+https://your.domain/mcp
+```
+
+For an OAuth-capable client, use the endpoint and select OAuth. Dynamic client registration is enabled by default because clients such as ChatGPT can use it.
+
+Supported/verified client shapes include:
+
+- ChatGPT custom connectors / developer mode
+- Claude Code with remote HTTP MCP
+- Other clients implementing remote MCP + OAuth
+
+For automation or a client that does not use OAuth, generate a static token:
+
+```bash
+./bin/runabout gen-token
+```
+
+Add it under `auth.static_tokens` and send:
+
+```http
+Authorization: Bearer <token>
+```
+
+## Health check and smoke test
+
+Basic checks:
 
 ```bash
 curl -s https://your.domain/healthz | jq
 curl -s https://your.domain/.well-known/oauth-protected-resource | jq
 ```
 
-### Skills
+The repository also ships an end-to-end smoke test:
 
-`skills/` ships agent skills for deploying and operating this thing: `runabout-deploy`,
-`runabout-connect`, `runabout-troubleshoot`, `runabout-harden`. Symlink them into
-`.claude/skills/` and an agent can do the deploy, the connector wiring, and the 502
-post-mortem with the gotchas already loaded. See [skills/README.md](skills/README.md).
-
-### CLI
-
-```
-runabout serve [-c config]        start the server
-runabout hash-password [password] bcrypt hash for auth.users
-runabout gen-token                random static token
-runabout check-policy 'command'   how the shell policy would treat a command
-runabout version
+```bash
+./skills/runabout-deploy/smoke.sh https://your.domain [static-token]
 ```
 
-`check-policy` loads extra rules from `-c` if you pass it. Exit status 2 is deny, 3 is confirm.
+It checks liveness, OAuth metadata, authentication challenges, CORS, the MCP handshake, and `tools/list`.
 
-## Modify
+## Configuration
 
-Most changes are configuration. Architecture, threat model, and the rationale for each trade-off live in [DESIGN.md](DESIGN.md).
+Environment variables override the YAML configuration:
 
-### Config you will actually touch
+```text
+RB_LISTEN
+RB_BASE_URL
+RB_DATA_DIR
+RB_USER
+RB_PASSWORD_HASH
+RB_STATIC_TOKEN
+RB_AUTH_DISABLED
+RB_LOG_LEVEL
+RB_LOG_FORMAT
+```
 
-| Area | What to change |
+`RB_CONFIG` can select the configuration file when `-c` is not supplied.
+
+The most commonly changed settings are:
+
+| Area | Configuration |
 |---|---|
-| Listen / public URL | `server.listen`, `server.base_url`, `RB_*` |
-| Who can log in | `auth.users`, `auth.session_cookie_ttl` |
-| Who can register clients | `auth.allow_dynamic_registration`, `auth.registration_token` |
-| Disable a tool | `tools.disabled` can further disable any of the 7 core tools (for example `["glob"]`) |
-| Shell sandbox-ish knobs | `tools.shell.default_workdir`, timeouts, `max_background`, extra `env` |
-| Path denylist | `policy.write_deny_paths`, `policy.read_deny_paths` (file tools only; shell is not bound by these) |
-| Shell rules | `policy.disabled_shell_rules`, `policy.downgrade_to_confirm`, `policy.extra_shell_rules` |
+| Listener / public URL | `server.listen`, `server.base_url` |
+| Login accounts | `auth.users`, `auth.session_cookie_ttl` |
+| Client registration | `auth.allow_dynamic_registration`, `auth.registration_token` |
+| MCP tools | `tools.disabled` |
+| Shell execution | `tools.shell.default_workdir`, timeouts, `max_background`, `env` |
+| File access | `policy.write_deny_paths`, `policy.read_deny_paths` |
+| Shell policy | `policy.disabled_shell_rules`, `policy.downgrade_to_confirm`, `policy.extra_shell_rules` |
 | Audit | `audit.enabled`, `audit.log_args`, `audit.file` |
-| AGPL source link | `server.source_url` — point this at *your* repo if you ship a modified build |
+| Source disclosure | `server.source_url` |
 
-Example extra rule:
+### Example shell rule
 
 ```yaml
 policy:
@@ -204,36 +274,72 @@ policy:
       arg_regex: '\bdestroy\b'
 ```
 
-`action` is `deny` or `confirm`. Rule ids for builtins show up in `runabout check-policy`. After changing policy tests, run `make test-policy`.
+Use `deny` for commands that should never be allowed and `confirm` for commands that require an explicit approval step.
 
-### Code
+After changing policy rules:
 
-```
-cmd/runabout          CLI: serve / hash-password / gen-token / check-policy
-internal/app          HTTP assembly (Build is used by e2e tests)
-internal/auth         OAuth 2.1 + Bearer middleware
-internal/mcp          JSON-RPC, tool registry, Streamable HTTP
-internal/tools        shell / files / search implementations
-internal/policy       shell AST, risk rules, path denylist, confirm tokens
-internal/audit        JSONL audit log
-internal/config       YAML, defaults, validation
+```bash
+make test-policy
 ```
 
-Extension points:
+## CLI
 
-- **New tool.** Implement `mcp.Handler` (`Definition()` + `Call()`) and register it in `tools.All()`.
-- **New builtin shell rule.** Add it in `builtinCmdRules()` with a clear `reason` and a `hint` the model can act on. Prefer `extra_shell_rules` when `command` + `arg_regex` is enough.
-- **Different IdP.** Replace `auth.Server.Protect`; the rest of the stack stays.
+```text
+runabout serve [-c config]        start the server
+runabout hash-password [password] bcrypt hash for auth.users
+runabout gen-token                generate a random static token
+runabout check-policy 'command'   inspect shell policy decisions
+runabout version                  print the version
+```
 
-`configs/config.example.yaml` is parsed in strict mode in tests — keep it in sync with the struct.
+`check-policy` returns exit status `2` for deny and `3` for confirm.
 
-If you modify the code and let other people use the service over the network, AGPL §13 requires that those users can obtain your modified source. The landing page and `/healthz` show `server.source_url`; set it to your repository. Self-hosting for yourself does not trigger that clause.
+## Skills
+
+The `skills/` directory contains reusable agent instructions for operating runabout:
+
+- `runabout-deploy` — deployment and smoke testing
+- `runabout-connect` — MCP connector setup
+- `runabout-troubleshoot` — diagnosing connectivity and 502 failures
+- `runabout-harden` — security hardening
+
+See [skills/README.md](skills/README.md).
+
+## Development
+
+```bash
+make fmt
+make vet
+make test
+make check
+make test-policy
+make docker
+```
+
+The main packages are:
+
+```text
+cmd/runabout          CLI
+internal/app          HTTP application assembly
+internal/auth         OAuth 2.1 and bearer authentication
+internal/mcp          JSON-RPC, MCP registry, Streamable HTTP
+internal/tools        shell and agent tools
+internal/policy       shell rules, path guards, confirmations
+internal/audit        JSONL audit logging
+internal/config       YAML configuration and validation
+```
+
+To add a tool, implement `mcp.Handler` (`Definition()` + `Call()`) and register it in `tools.All()`. Keep the default tool surface small; a new tool should provide a capability that cannot be expressed cleanly by the existing seven.
+
+`configs/config.example.yaml` is parsed in strict mode by tests, so keep it synchronized with the configuration structs.
 
 ## Compatibility
 
-- MCP protocol `2025-06-18` (also `2025-03-26`, `2024-11-05`)
-- Transport: Streamable HTTP — `POST /mcp` submit, `GET /mcp` SSE, `DELETE /mcp` end session
-- Dependencies (all AGPL-compatible): `mvdan.cc/sh`, `golang.org/x/crypto`, `golang.org/x/term`, `gopkg.in/yaml.v3`. Protocol and OAuth are implemented in-tree.
+- MCP protocol: `2025-06-18`, `2025-03-26`, `2024-11-05`
+- Transport: Streamable HTTP
+- MCP endpoint: `POST /mcp`, `GET /mcp`, `DELETE /mcp`
+- OAuth: OAuth 2.1-style authorization code + PKCE, local token issuance, and RFC 7591 dynamic registration
+- Architectures: amd64 and arm64
 
 ## License
 
