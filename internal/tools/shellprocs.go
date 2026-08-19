@@ -7,7 +7,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/noir017/agent-tools-mcp/internal/mcp"
+	"github.com/noir017/runabout/internal/mcp"
 )
 
 // ---------- shell_list ----------

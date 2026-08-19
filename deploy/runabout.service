@@ -1,8 +1,8 @@
 # 裸机部署用的 systemd 单元。放到 /etc/systemd/system/ 后：
-#   systemctl daemon-reload && systemctl enable --now agent-tools-mcp
+#   systemctl daemon-reload && systemctl enable --now runabout
 [Unit]
-Description=agent-tools-mcp (MCP server exposing shell/file tools to agents)
-Documentation=https://github.com/noir017/agent-tools-mcp
+Description=runabout (MCP server exposing shell/file tools to agents)
+Documentation=https://github.com/noir017/runabout
 After=network-online.target
 Wants=network-online.target
 
@@ -13,14 +13,14 @@ Type=simple
 User=agent
 Group=agent
 WorkingDirectory=/srv/workspace
-ExecStart=/usr/local/bin/agent-tools-mcp serve -c /etc/agent-tools-mcp/config.yaml
+ExecStart=/usr/local/bin/runabout serve -c /etc/runabout/config.yaml
 Restart=on-failure
 RestartSec=3s
 KillMode=mixed
 TimeoutStopSec=20s
 
-Environment=ATM_LOG_FORMAT=json
-StateDirectory=agent-tools-mcp
+Environment=RB_LOG_FORMAT=json
+StateDirectory=runabout
 StateDirectoryMode=0700
 
 # 适度加固。注意别开 ProtectHome/ProtectSystem=strict：

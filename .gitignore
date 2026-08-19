@@ -1,5 +1,5 @@
 bin/
-/agent-tools-mcp
+/runabout
 *.test
 coverage.out
 

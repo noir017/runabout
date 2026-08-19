@@ -5,7 +5,7 @@ import (
 	"html/template"
 	"net/http"
 
-	"github.com/noir017/agent-tools-mcp/internal/config"
+	"github.com/noir017/runabout/internal/config"
 )
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -27,7 +27,7 @@ type landingData struct {
 var landingTmpl = template.Must(template.New("landing").Parse(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>agent-tools-mcp</title>
+<title>runabout</title>
 <style>
 :root { color-scheme: light dark; --bg:#f6f7f9; --card:#fff; --fg:#1a1c1f; --muted:#6b7280;
         --border:#e4e6eb; --accent:#2f6feb; }
@@ -52,7 +52,7 @@ a { color:var(--accent); }
 </style></head>
 <body><main>
   <div class="card">
-    <h1>agent-tools-mcp</h1>
+    <h1>runabout</h1>
     <p class="sub">版本 {{.Version}}｜MCP 端点 <code>{{.MCPURL}}</code>｜
       鉴权 {{if .AuthOn}}OAuth 2.1 已启用{{else}}<span class="warn">已关闭（仅限本机调试）</span>{{end}}</p>
     <h2>已注册的 {{.ToolCount}} 个工具</h2>
@@ -79,7 +79,7 @@ curl -s {{.MCPURL}} -H 'Authorization: Bearer &lt;token&gt;' \
   </div>
   <div class="card">
     <h2>许可</h2>
-    <p class="sub">agent-tools-mcp，Copyright (C) 2026 noir017，按
+    <p class="sub">runabout，Copyright (C) 2026 noir017，按
       <a href="https://www.gnu.org/licenses/agpl-3.0.html">GNU AGPL v3 或更新版本</a>授权。<br>
       本服务的对应源码：<a href="{{.SourceURL}}">{{.SourceURL}}</a>
       （AGPL 第 13 条要求网络服务向使用者提供源码；如果你部署的是改过的版本，

@@ -55,14 +55,14 @@ func TestAuthRequiresCredentials(t *testing.T) {
 
 func TestDataDirIsProtected(t *testing.T) {
 	cfg := Default()
-	cfg.Server.DataDir = "/var/lib/atm"
+	cfg.Server.DataDir = "/var/lib/runabout"
 	cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x"}}
 	if err := cfg.Normalize(); err != nil {
 		t.Fatal(err)
 	}
 	found := false
 	for _, p := range cfg.Policy.WriteDenyPaths {
-		if p == "/var/lib/atm/**" {
+		if p == "/var/lib/runabout/**" {
 			found = true
 		}
 	}

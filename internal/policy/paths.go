@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/noir017/agent-tools-mcp/internal/config"
-	"github.com/noir017/agent-tools-mcp/internal/globmatch"
+	"github.com/noir017/runabout/internal/config"
+	"github.com/noir017/runabout/internal/globmatch"
 )
 
 // PathGuard 按黑名单拦截文件工具对敏感路径的读写。

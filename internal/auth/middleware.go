@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/noir017/agent-tools-mcp/internal/mcp"
+	"github.com/noir017/runabout/internal/mcp"
 )
 
 // Protect 是资源服务器侧的 Bearer 校验中间件。
@@ -64,7 +64,7 @@ func (s *Server) resourceMatches(res string) bool {
 
 func (s *Server) challenge(w http.ResponseWriter, errCode, desc string) {
 	w.Header().Set("WWW-Authenticate", fmt.Sprintf(
-		`Bearer realm="agent-tools-mcp", error=%q, error_description=%q, resource_metadata=%q`,
+		`Bearer realm="runabout", error=%q, error_description=%q, resource_metadata=%q`,
 		errCode, desc, s.base()+PathProtectedResource))
 	oauthError(w, http.StatusUnauthorized, errCode, desc)
 }

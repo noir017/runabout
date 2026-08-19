@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/noir017/agent-tools-mcp/internal/idgen"
+	"github.com/noir017/runabout/internal/idgen"
 )
 
 // Proc 是一个后台运行的 shell 进程。

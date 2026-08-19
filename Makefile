@@ -1,13 +1,13 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -s -w -X github.com/noir017/agent-tools-mcp/internal/app.Version=$(VERSION)
-BIN := bin/agent-tools-mcp
+LDFLAGS := -s -w -X github.com/noir017/runabout/internal/app.Version=$(VERSION)
+BIN := bin/runabout
 
 .PHONY: all build test lint fmt vet run docker clean check
 
 all: check build
 
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/agent-tools-mcp
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/runabout
 
 test:
 	go test ./... -count=1
@@ -28,7 +28,7 @@ run: build
 	./$(BIN) serve -c configs/config.yaml
 
 docker:
-	docker build -f deploy/Dockerfile -t agent-tools-mcp:$(VERSION) --build-arg VERSION=$(VERSION) .
+	docker build -f deploy/Dockerfile -t runabout:$(VERSION) --build-arg VERSION=$(VERSION) .
 
 clean:
 	rm -rf bin

@@ -1,4 +1,6 @@
-# agent-tools-mcp
+# runabout
+
+> 跑上跑下的那位。
 
 把一台 Linux 机器的基础操作能力，通过 MCP 暴露给能连 MCP 的 agent。
 
@@ -6,7 +8,7 @@
 接上之后 ChatGPT 就成了一个能真正动手的个人助理：查服务状态、改配置、跑部署、看日志。
 
 ```
-ChatGPT ──HTTPS──> 反代/隧道 ──> agent-tools-mcp ──> 这台机器
+ChatGPT ──HTTPS──> 反代/隧道 ──> runabout ──> 这台机器
               (OAuth 2.1 + PKCE)      (策略拦截 + 审计)
 ```
 
@@ -60,11 +62,11 @@ if true; then rm -rf /; fi    # 复合语句里的命令同样被检查
 用 `check-policy` 可以随时验证某条命令会被怎么处理：
 
 ```console
-$ agent-tools-mcp check-policy 'rm -rf ./node_modules'
+$ runabout check-policy 'rm -rf ./node_modules'
 判定: allow
 没有命中任何规则，会直接执行。
 
-$ agent-tools-mcp check-policy 'sudo rm -rf $HOME'
+$ runabout check-policy 'sudo rm -rf $HOME'
 判定: deny
 · [rm-recursive] 递归删除高风险路径（deny）
   细节：删除目标: /home/agent
@@ -76,7 +78,7 @@ $ agent-tools-mcp check-policy 'sudo rm -rf $HOME'
 ### 1. 构建
 
 ```bash
-make build                    # 产出 bin/agent-tools-mcp
+make build                    # 产出 bin/runabout
 # 或者
 make docker                   # 镜像里带 git/rg/jq/python/编译器等常用工具
 ```
@@ -85,7 +87,7 @@ make docker                   # 镜像里带 git/rg/jq/python/编译器等常用
 
 ```bash
 cp configs/config.example.yaml configs/config.yaml
-./bin/agent-tools-mcp hash-password        # 交互输入，输出 bcrypt 哈希
+./bin/runabout hash-password        # 交互输入，输出 bcrypt 哈希
 ```
 
 把哈希填进 `auth.users[0].password_hash`，并把 `server.base_url` 改成你的公网地址。
@@ -113,7 +115,7 @@ location / {
 ### 4. 启动并接入
 
 ```bash
-./bin/agent-tools-mcp serve -c configs/config.yaml
+./bin/runabout serve -c configs/config.yaml
 ```
 
 浏览器打开 `https://你的域名/` 会有一页接入说明。然后在 ChatGPT 里：
@@ -145,7 +147,7 @@ curl -s https://你的域名/mcp \
 
   ```bash
   cd deploy
-  cp .env.example .env                 # 至少填 ATM_BASE_URL；AGENT_UID 设成宿主机工作区的属主
+  cp .env.example .env                 # 至少填 RB_BASE_URL；AGENT_UID 设成宿主机工作区的属主
   cp ../configs/config.example.yaml config.yaml
   docker compose up -d --build
   ```
@@ -154,22 +156,22 @@ curl -s https://你的域名/mcp \
   `apt install` 缺的工具——容器内提权等于容器内 root，边界仍是容器本身。不想要就把 `.env` 里的
   `SUDO_NOPASSWD` 改成 `false` 重建，此时可以顺手打开 compose 里注释着的 `no-new-privileges`
   （开了免密 sudo 就不能开它，否则 sudo 直接失效）。
-- **裸机**：`deploy/agent-tools-mcp.service`。建议专门建一个用户跑，需要提权的操作通过 sudoers 精确授予。
+- **裸机**：`deploy/runabout.service`。建议专门建一个用户跑，需要提权的操作通过 sudoers 精确授予。
 
 > 跑这个服务的身份，就是 agent 拿到的身份。默认给 root 等于把整台机器交出去。
 
 ## 命令行
 
 ```
-agent-tools-mcp serve [-c 配置]        启动服务
-agent-tools-mcp hash-password [密码]   生成 bcrypt 密码哈希
-agent-tools-mcp gen-token              生成随机静态令牌
-agent-tools-mcp check-policy '命令'    看某条命令会被策略怎么处理
-agent-tools-mcp version
+runabout serve [-c 配置]        启动服务
+runabout hash-password [密码]   生成 bcrypt 密码哈希
+runabout gen-token              生成随机静态令牌
+runabout check-policy '命令'    看某条命令会被策略怎么处理
+runabout version
 ```
 
-环境变量可覆盖常改项：`ATM_LISTEN`、`ATM_BASE_URL`、`ATM_DATA_DIR`、`ATM_USER`、`ATM_PASSWORD_HASH`、
-`ATM_STATIC_TOKEN`、`ATM_AUTH_DISABLED`、`ATM_LOG_LEVEL`、`ATM_LOG_FORMAT`。
+环境变量可覆盖常改项：`RB_LISTEN`、`RB_BASE_URL`、`RB_DATA_DIR`、`RB_USER`、`RB_PASSWORD_HASH`、
+`RB_STATIC_TOKEN`、`RB_AUTH_DISABLED`、`RB_LOG_LEVEL`、`RB_LOG_FORMAT`。
 
 ## 兼容性
 

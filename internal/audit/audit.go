@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/noir017/agent-tools-mcp/internal/config"
-	"github.com/noir017/agent-tools-mcp/internal/mcp"
+	"github.com/noir017/runabout/internal/config"
+	"github.com/noir017/runabout/internal/mcp"
 )
 
 // Record 是一条审计记录。

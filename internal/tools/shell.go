@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/noir017/agent-tools-mcp/internal/mcp"
-	"github.com/noir017/agent-tools-mcp/internal/policy"
+	"github.com/noir017/runabout/internal/mcp"
+	"github.com/noir017/runabout/internal/policy"
 )
 
 type shellTool struct{ d *Deps }

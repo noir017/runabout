@@ -13,12 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/noir017/agent-tools-mcp/internal/audit"
-	"github.com/noir017/agent-tools-mcp/internal/auth"
-	"github.com/noir017/agent-tools-mcp/internal/config"
-	"github.com/noir017/agent-tools-mcp/internal/mcp"
-	"github.com/noir017/agent-tools-mcp/internal/policy"
-	"github.com/noir017/agent-tools-mcp/internal/tools"
+	"github.com/noir017/runabout/internal/audit"
+	"github.com/noir017/runabout/internal/auth"
+	"github.com/noir017/runabout/internal/config"
+	"github.com/noir017/runabout/internal/mcp"
+	"github.com/noir017/runabout/internal/policy"
+	"github.com/noir017/runabout/internal/tools"
 )
 
 // Version 由构建时通过 -ldflags 注入。
@@ -81,7 +81,7 @@ func Build(cfg *config.Config, log *slog.Logger) (*Built, error) {
 	}
 
 	mcpSrv := mcp.NewServer(mcp.Implementation{
-		Name: "agent-tools-mcp", Title: "服务器基础工具集", Version: Version,
+		Name: "runabout", Title: "服务器基础工具集", Version: Version,
 	}, serverInstructions, log)
 	mcpSrv.SetAuditor(aud)
 	mcpSrv.Register(tools.All(deps)...)
@@ -150,7 +150,7 @@ func Run(cfgPath string) error {
 		IdleTimeout: 10 * time.Minute,
 	}
 
-	log.Info("agent-tools-mcp 启动",
+	log.Info("runabout 启动",
 		"version", Version, "listen", cfg.Server.Listen, "base_url", cfg.Server.BaseURL,
 		"auth", cfg.Auth.Enabled, "tools", len(built.Tools))
 	if !cfg.Auth.Enabled {
@@ -184,7 +184,7 @@ func Run(cfgPath string) error {
 
 func newLogger() *slog.Logger {
 	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("ATM_LOG_LEVEL")) {
+	switch strings.ToLower(os.Getenv("RB_LOG_LEVEL")) {
 	case "debug":
 		level = slog.LevelDebug
 	case "warn":
@@ -194,7 +194,7 @@ func newLogger() *slog.Logger {
 	}
 	opts := &slog.HandlerOptions{Level: level}
 	var h slog.Handler = slog.NewTextHandler(os.Stderr, opts)
-	if strings.EqualFold(os.Getenv("ATM_LOG_FORMAT"), "json") {
+	if strings.EqualFold(os.Getenv("RB_LOG_FORMAT"), "json") {
 		h = slog.NewJSONHandler(os.Stderr, opts)
 	}
 	l := slog.New(h)
@@ -204,9 +204,9 @@ func newLogger() *slog.Logger {
 
 // selfNames 给 shell 策略提供"本服务自身"的名字，用于识别自杀式命令。
 func selfNames() []string {
-	names := []string{"agent-tools-mcp"}
+	names := []string{"runabout"}
 	if exe, err := os.Executable(); err == nil {
-		if base := baseName(exe); base != "" && base != "agent-tools-mcp" {
+		if base := baseName(exe); base != "" && base != "runabout" {
 			names = append(names, base)
 		}
 	}

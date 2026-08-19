@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/noir017/agent-tools-mcp/internal/config"
+	"github.com/noir017/runabout/internal/config"
 )
 
 func newTestGuard(t *testing.T) *ShellGuard {
 	t.Helper()
 	cfg := config.Default()
-	g, err := NewShellGuard(cfg.Policy, []string{"agent-tools-mcp"})
+	g, err := NewShellGuard(cfg.Policy, []string{"runabout"})
 	if err != nil {
 		t.Fatalf("构造 guard 失败: %v", err)
 	}
@@ -137,8 +137,8 @@ func TestConfirms(t *testing.T) {
 		"tee /etc/sudoers",
 		"userdel someone",
 		"passwd root",
-		"pkill -f agent-tools-mcp",
-		"systemctl stop agent-tools-mcp",
+		"pkill -f runabout",
+		"systemctl stop runabout",
 		"yes | rm -rf ./important",
 		"find / -name '*.log' -delete",
 		"find ./tmp -delete",

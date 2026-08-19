@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/noir017/agent-tools-mcp/internal/mcp"
+	"github.com/noir017/runabout/internal/mcp"
 )
 
 type listDirTool struct{ d *Deps }

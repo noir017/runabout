@@ -1,6 +1,6 @@
 # 设计说明
 
-这份文档记录 agent-tools-mcp 的结构、每处取舍的理由，以及威胁模型。
+这份文档记录 runabout 的结构、每处取舍的理由，以及威胁模型。
 代码里的注释解释"这段在做什么"，这里解释"为什么这么做"。
 
 ## 1. 目标与约束
@@ -20,7 +20,7 @@
 ## 2. 分层
 
 ```
-cmd/agent-tools-mcp        CLI：serve / hash-password / gen-token / check-policy
+cmd/runabout        CLI：serve / hash-password / gen-token / check-policy
   └── internal/app         装配：把各层拼成一个 http.Handler（Build 可被测试直接调用）
         ├── internal/auth      OAuth 2.1 授权服务器 + Bearer 校验中间件
         ├── internal/mcp       JSON-RPC 消息层、工具注册表、Streamable HTTP 传输

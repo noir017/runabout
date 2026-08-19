@@ -1,4 +1,4 @@
-# agent-tools-mcp 运行镜像。
+# runabout 运行镜像。
 #
 # 交叉说明：镜像本身与架构无关（apt 包 + 纯 Go 编译），amd64 / arm64 都能直接构建。
 # 构建：docker compose -f deploy/docker-compose.yml build
@@ -19,9 +19,9 @@ ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath \
-      -ldflags "-s -w -X github.com/noir017/agent-tools-mcp/internal/app.Version=${VERSION}" \
-      -o /out/agent-tools-mcp ./cmd/agent-tools-mcp \
-    && /out/agent-tools-mcp version
+      -ldflags "-s -w -X github.com/noir017/runabout/internal/app.Version=${VERSION}" \
+      -o /out/runabout ./cmd/runabout \
+    && /out/runabout version
 
 # ---------- 运行 ----------
 # 这个服务的价值就在于容器里工具齐全，所以刻意不用 scratch/alpine：
@@ -44,8 +44,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 不加这条，agent 在里面跑任何 git 命令都会撞上 "dubious ownership"。
 RUN git config --system --add safe.directory '*'
 
-COPY --from=build /out/agent-tools-mcp /usr/local/bin/agent-tools-mcp
-COPY LICENSE NOTICE /usr/share/doc/agent-tools-mcp/
+COPY --from=build /out/runabout /usr/local/bin/runabout
+COPY LICENSE NOTICE /usr/share/doc/runabout/
 
 # 非 root 运行：agent 拿到的权限就是这个用户的权限。
 # uid/gid 做成参数，好和宿主机上工作区目录的属主对齐，省去一堆 chown。
@@ -57,8 +57,8 @@ ARG AGENT_GID=10001
 ARG SUDO_NOPASSWD=true
 RUN groupadd -g "${AGENT_GID}" agent \
     && useradd -m -s /bin/bash -u "${AGENT_UID}" -g "${AGENT_GID}" agent \
-    && mkdir -p /workspace /var/lib/agent-tools-mcp \
-    && chown -R agent:agent /workspace /var/lib/agent-tools-mcp \
+    && mkdir -p /workspace /var/lib/runabout \
+    && chown -R agent:agent /workspace /var/lib/runabout \
     && if [ "${SUDO_NOPASSWD}" = "true" ]; then \
          echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent \
          && chmod 0440 /etc/sudoers.d/agent \
@@ -68,8 +68,8 @@ RUN groupadd -g "${AGENT_GID}" agent \
 USER agent
 WORKDIR /workspace
 
-ENV ATM_LISTEN=0.0.0.0:8484 \
-    ATM_DATA_DIR=/var/lib/agent-tools-mcp \
+ENV RB_LISTEN=0.0.0.0:8484 \
+    RB_DATA_DIR=/var/lib/runabout \
     PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/home/agent/.local/bin \
     LANG=C.UTF-8 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -78,10 +78,10 @@ EXPOSE 8484
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8484/healthz >/dev/null || exit 1
 
-LABEL org.opencontainers.image.title="agent-tools-mcp" \
+LABEL org.opencontainers.image.title="runabout" \
       org.opencontainers.image.description="MCP server exposing shell/file tools to agents" \
-      org.opencontainers.image.source="https://github.com/noir017/agent-tools-mcp" \
+      org.opencontainers.image.source="https://github.com/noir017/runabout" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later"
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/agent-tools-mcp"]
-CMD ["serve", "-c", "/etc/agent-tools-mcp/config.yaml"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/runabout"]
+CMD ["serve", "-c", "/etc/runabout/config.yaml"]

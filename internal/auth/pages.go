@@ -52,10 +52,10 @@ code { background:var(--bg); padding:1px 5px; border-radius:4px; font-size:12px;
 var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>授权 · agent-tools-mcp</title><style>` + pageStyle + `</style></head>
+<title>授权 · runabout</title><style>` + pageStyle + `</style></head>
 <body><form class="card" method="post" action="` + PathLogin + `">
   <h1>授权访问服务器工具</h1>
-  <p class="sub"><strong>{{.ClientName}}</strong> 请求连接到这台机器的 agent-tools-mcp。
+  <p class="sub"><strong>{{.ClientName}}</strong> 请求连接到这台机器的 runabout。
      授权后它将能执行 shell 命令、读写文件。</p>
   <input type="hidden" name="req_id" value="{{.ReqID}}">
   <label for="u">用户名</label>
@@ -71,7 +71,7 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
 var errorTmpl = template.Must(template.New("err").Parse(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{.Title}} · agent-tools-mcp</title><style>` + pageStyle + `</style></head>
+<title>{{.Title}} · runabout</title><style>` + pageStyle + `</style></head>
 <body><div class="card">
   <h1>{{.Title}}</h1>
   <p class="sub">{{.Detail}}</p>

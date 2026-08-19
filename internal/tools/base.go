@@ -9,10 +9,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/noir017/agent-tools-mcp/internal/audit"
-	"github.com/noir017/agent-tools-mcp/internal/config"
-	"github.com/noir017/agent-tools-mcp/internal/mcp"
-	"github.com/noir017/agent-tools-mcp/internal/policy"
+	"github.com/noir017/runabout/internal/audit"
+	"github.com/noir017/runabout/internal/config"
+	"github.com/noir017/runabout/internal/mcp"
+	"github.com/noir017/runabout/internal/policy"
 )
 
 // Deps 是所有工具共享的依赖。
