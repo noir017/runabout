@@ -1,0 +1,37 @@
+# 裸机部署用的 systemd 单元。放到 /etc/systemd/system/ 后：
+#   systemctl daemon-reload && systemctl enable --now agent-tools-mcp
+[Unit]
+Description=agent-tools-mcp (MCP server exposing shell/file tools to agents)
+Documentation=https://github.com/noir017/agent-tools-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 这个服务的全部意义是代人操作机器，所以用哪个身份跑就等于给 agent 哪个身份。
+# 建议专门建一个用户，需要的权限通过 sudoers 精确授予，而不是直接 root。
+User=agent
+Group=agent
+WorkingDirectory=/srv/workspace
+ExecStart=/usr/local/bin/agent-tools-mcp serve -c /etc/agent-tools-mcp/config.yaml
+Restart=on-failure
+RestartSec=3s
+KillMode=mixed
+TimeoutStopSec=20s
+
+Environment=ATM_LOG_FORMAT=json
+StateDirectory=agent-tools-mcp
+StateDirectoryMode=0700
+
+# 适度加固。注意别开 ProtectHome/ProtectSystem=strict：
+# 这个服务本来就是要读写机器上的文件，锁太死会让它没法干活。
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectKernelTunables=true
+ProtectKernelModules=false
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

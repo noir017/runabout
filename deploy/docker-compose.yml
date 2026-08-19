@@ -1,0 +1,39 @@
+services:
+  agent-tools-mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        VERSION: "0.1.0"
+    image: agent-tools-mcp:0.1.0
+    container_name: agent-tools-mcp
+    restart: unless-stopped
+    # 只暴露到回环，HTTPS 由反代/隧道提供。
+    ports:
+      - "127.0.0.1:8484:8484"
+    environment:
+      ATM_BASE_URL: "https://mcp.example.com"
+      ATM_LOG_LEVEL: "info"
+    volumes:
+      - ./config.yaml:/etc/agent-tools-mcp/config.yaml:ro
+      - atm-data:/var/lib/agent-tools-mcp
+      # agent 的工作区。想让它管别的目录就在这里挂进来。
+      - ./workspace:/workspace
+    # agent 会跑编译、测试之类的活，给够资源但设上限，免得一条命令把宿主机拖死。
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+    security_opt:
+      - no-new-privileges:true
+
+  # 可选：用 Cloudflare Tunnel 出公网，不必开端口也不必自己搞证书。
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+  #   depends_on: [agent-tools-mcp]
+
+volumes:
+  atm-data:

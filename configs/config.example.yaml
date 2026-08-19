@@ -1,0 +1,147 @@
+# agent-tools-mcp 配置示例
+#
+# 所有字段都有默认值，只写要改的即可。环境变量优先级高于本文件：
+#   ATM_LISTEN / ATM_BASE_URL / ATM_DATA_DIR / ATM_USER / ATM_PASSWORD_HASH
+#   ATM_STATIC_TOKEN / ATM_AUTH_DISABLED / ATM_LOG_LEVEL / ATM_LOG_FORMAT
+
+server:
+  # 只监听回环，HTTPS 由外层反代（Cloudflare Tunnel / Nginx / Caddy）提供。
+  # 容器里要写 0.0.0.0:8484，否则宿主机映射不进来。
+  listen: "127.0.0.1:8484"
+
+  # 对外可访问的根地址，必须与你在 ChatGPT 里填的一致，且必须是 https。
+  # OAuth 元数据、回调校验、资源标识全都以它为准，写错了整条授权链路都不通。
+  base_url: "https://mcp.example.com"
+
+  trust_proxy: true
+
+  # 浏览器 Origin 白名单（防 DNS rebinding）。非浏览器客户端不带 Origin，不受影响。
+  allowed_origins:
+    - "https://chatgpt.com"
+    - "https://chat.openai.com"
+    - "https://claude.ai"
+
+  session_ttl: 2h
+  # 部分客户端不回传 Mcp-Session-Id，默认宽松处理；确定客户端规范可以打开。
+  strict_sessions: false
+
+  # 对应源码的获取地址，展示在服务根页面与 /healthz。
+  # 本项目按 AGPL-3.0 授权：改了代码又对外提供服务的话，第 13 条要求让使用者
+  # 能拿到你修改后的源码，此时请把这里指向你自己的仓库。
+  source_url: "https://github.com/noir017/agent-tools-mcp"
+
+  # OAuth 客户端注册信息与令牌存放处。该目录被自动加入文件工具黑名单，
+  # 免得 agent 自己去改令牌库。
+  data_dir: "/var/lib/agent-tools-mcp"
+
+auth:
+  enabled: true
+
+  # 登录账号。password_hash 用 `agent-tools-mcp hash-password` 生成。
+  # 这个口令等价于服务器 shell 权限，别用弱密码。
+  users:
+    - username: "noir017"
+      password_hash: "$2a$12$替换成 hash-password 的输出"
+
+  # ChatGPT 添加连接器时靠动态注册自助接入（RFC 7591），关掉就得手工预置客户端。
+  allow_dynamic_registration: true
+  # 非空时 /oauth/register 需要带该 Bearer 令牌，可挡住陌生人乱注册。
+  registration_token: ""
+
+  access_token_ttl: 1h
+  refresh_token_ttl: 720h
+  auth_code_ttl: 5m
+  # 浏览器登录态有效期，用于再次授权时免密。设为 0 表示每次都要输密码。
+  session_cookie_ttl: 12h
+
+  # 绕过 OAuth 的长期令牌，方便 curl 自检或别的 agent 直连。
+  # 用 `agent-tools-mcp gen-token` 生成。不需要就留空。
+  static_tokens: []
+  #  - name: "curl-debug"
+  #    token: "……"
+
+tools:
+  # 想下线某些工具就填名字，例如 ["write"] 只保留 apply_patch 改文件。
+  disabled: []
+
+  shell:
+    path: "/bin/bash"
+    default_timeout: 2m
+    max_timeout: 1h
+    # 默认工作目录，留空则用进程启动目录。
+    default_workdir: "/workspace"
+    max_output_bytes: 200000
+    max_background: 16
+    env: {}
+    #  PATH: "/usr/local/bin:/usr/bin:/bin"
+
+  fs:
+    max_read_bytes: 4194304
+    max_line_chars: 2000
+    default_lines: 2000
+    max_write_bytes: 8388608
+    max_image_bytes: 4194304
+
+  search:
+    # 有 rg 就用 rg（快且尊重 .gitignore），没有则回退内置实现。
+    use_ripgrep: true
+    ripgrep_path: ""
+    max_results: 200
+    max_glob_results: 500
+    timeout: 60s
+    max_file_bytes: 4194304
+    ignore_dirs: [".git", "node_modules", "vendor", ".venv", "venv",
+                  "__pycache__", "dist", "build", "target", ".next", ".cache"]
+
+policy:
+  # 二次确认令牌的有效期。
+  confirm_ttl: 5m
+
+  # 文件工具（read/write/apply_patch/search/glob/list_dir）的路径黑名单。
+  # 注意 shell 工具按设计不受这里约束，它只受下面的 shell 规则约束。
+  write_deny_paths:
+    - "/proc/**"
+    - "/sys/**"
+    - "/dev/**"
+    - "/boot/**"
+    - "/run/**"
+    - "/etc/shadow"
+    - "/etc/sudoers"
+    - "/etc/sudoers.d/**"
+    - "~/.ssh/authorized_keys"
+
+  # 凭据类文件：既禁止文件工具读取，也让 shell 里的 cat/base64 之类需要二次确认。
+  read_deny_paths:
+    - "/etc/shadow"
+    - "~/.ssh/id_*"
+    - "~/.ssh/*_rsa"
+    - "~/.ssh/*_ed25519"
+    - "~/.aws/credentials"
+    - "~/.config/gh/hosts.yml"
+    - "~/.docker/config.json"
+    - "~/.kube/config"
+    - "~/.netrc"
+
+  # 按 id 关掉内置 shell 规则（用 `agent-tools-mcp check-policy` 看 id）。
+  disabled_shell_rules: []
+
+  # 把内置的 deny 规则降级为"可二次确认"。例如你确实需要偶尔跑 rm -rf /etc：
+  # downgrade_to_confirm: ["rm-recursive"]
+  downgrade_to_confirm: []
+
+  # 追加自己的规则。action 只能是 deny 或 confirm。
+  extra_shell_rules: []
+  #  - id: "no-terraform-destroy"
+  #    action: "confirm"
+  #    reason: "会销毁云上资源"
+  #    hint: "先 terraform plan -destroy 看清楚要删什么"
+  #    command: "terraform"
+  #    arg_regex: '\bdestroy\b'
+
+audit:
+  enabled: true
+  # 留空则写到 data_dir/audit.jsonl
+  file: ""
+  # 记录工具参数原文。关掉只留长度，隐私更好但排查更难。
+  log_args: true
+  max_args: 4000

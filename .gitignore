@@ -1,0 +1,13 @@
+bin/
+/agent-tools-mcp
+*.test
+coverage.out
+
+# 本地配置与状态：含密码哈希、令牌、审计日志，绝不入库
+configs/config.yaml
+deploy/config.yaml
+deploy/workspace/
+*.local.yaml
+data/
+audit.jsonl
+oauth.json
