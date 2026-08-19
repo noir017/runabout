@@ -142,9 +142,24 @@ location / {
 自检：
 
 ```bash
+./skills/runabout-deploy/smoke.sh https://你的域名 [静态令牌]
+```
+
+把客户端接入会走的每一步都验一遍——存活、OAuth 元数据、401 挑战、CORS 预检、
+MCP 握手、`tools/list`——有任何一项失败就返回非零。只依赖 curl/grep/sed。
+手工快查两条：
+
+```bash
 curl -s https://你的域名/healthz | jq
 curl -s https://你的域名/.well-known/oauth-protected-resource | jq
 ```
+
+### 技能包
+
+`skills/` 里带了部署和运维用的 agent 技能：`runabout-deploy`、`runabout-connect`、
+`runabout-troubleshoot`、`runabout-harden`。软链进 `.claude/skills/` 之后，
+部署、接连接器、查 502 都能让 agent 带着这些坑的前提去做，
+见 [skills/README.md](skills/README.md)。
 
 ### 命令行
 
