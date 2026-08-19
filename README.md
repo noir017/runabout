@@ -142,9 +142,24 @@ For curl or a non-OAuth agent, add an entry under `auth.static_tokens` (`runabou
 Smoke:
 
 ```bash
+./skills/runabout-deploy/smoke.sh https://your.domain [static-token]
+```
+
+Walks every step a client takes on connect — liveness, OAuth metadata, the 401 challenge,
+the CORS preflight, the MCP handshake, `tools/list` — and exits non-zero on any failure.
+Needs only curl, grep and sed. The two quick checks by hand:
+
+```bash
 curl -s https://your.domain/healthz | jq
 curl -s https://your.domain/.well-known/oauth-protected-resource | jq
 ```
+
+### Skills
+
+`skills/` ships agent skills for deploying and operating this thing: `runabout-deploy`,
+`runabout-connect`, `runabout-troubleshoot`, `runabout-harden`. Symlink them into
+`.claude/skills/` and an agent can do the deploy, the connector wiring, and the 502
+post-mortem with the gotchas already loaded. See [skills/README.md](skills/README.md).
 
 ### CLI
 

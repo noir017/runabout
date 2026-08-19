@@ -23,4 +23,6 @@ oauth.json
 
 # 文档不参与构建（LICENSE/NOTICE 例外，要随镜像分发）
 README.md
+README.zh.md
 DESIGN.md
+skills/
