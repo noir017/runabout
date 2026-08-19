@@ -184,7 +184,7 @@ Most changes are configuration. Architecture, threat model, and the rationale fo
 | Listen / public URL | `server.listen`, `server.base_url`, `RB_*` |
 | Who can log in | `auth.users`, `auth.session_cookie_ttl` |
 | Who can register clients | `auth.allow_dynamic_registration`, `auth.registration_token` |
-| Disable a tool | `tools.disabled` (e.g. `["write"]` to force `apply_patch`) |
+| Disable a tool | `tools.disabled` can further disable any of the 7 core tools (for example `["glob"]`) |
 | Shell sandbox-ish knobs | `tools.shell.default_workdir`, timeouts, `max_background`, extra `env` |
 | Path denylist | `policy.write_deny_paths`, `policy.read_deny_paths` (file tools only; shell is not bound by these) |
 | Shell rules | `policy.disabled_shell_rules`, `policy.downgrade_to_confirm`, `policy.extra_shell_rules` |

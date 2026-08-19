@@ -184,7 +184,7 @@ runabout version
 | 监听 / 公网地址 | `server.listen`、`server.base_url`、`RB_*` |
 | 谁能登录 | `auth.users`、`auth.session_cookie_ttl` |
 | 谁能注册客户端 | `auth.allow_dynamic_registration`、`auth.registration_token` |
-| 下线某个工具 | `tools.disabled`（例如 `["write"]`，只留 `apply_patch` 改文件） |
+| 下线某个工具 | `tools.disabled` 可以继续关闭 7 个核心工具中的任意一个（例如 `["glob"]`） |
 | shell 工作目录与限额 | `tools.shell.default_workdir`、超时、`max_background`、额外 `env` |
 | 路径黑名单 | `policy.write_deny_paths`、`policy.read_deny_paths`（只约束文件工具，不约束 shell） |
 | shell 规则 | `policy.disabled_shell_rules`、`policy.downgrade_to_confirm`、`policy.extra_shell_rules` |
