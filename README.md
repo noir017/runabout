@@ -200,6 +200,23 @@ Supported/verified client shapes include:
 - Claude Code with remote HTTP MCP
 - Other clients implementing remote MCP + OAuth
 
+Some clients send a bare `initialize` while validating that the URL is an MCP
+server, and treat the resulting 401 as "not a valid MCP server" without ever
+following the OAuth entry point advertised in `WWW-Authenticate`. Gemini custom
+connectors behave this way (`User-Agent: Google`, server-side, no `Origin` and no
+`Authorization`). Such clients need the handshake itself to be let through:
+
+```yaml
+auth:
+  allow_unauthenticated_initialize: true
+```
+
+Only `initialize` and `notifications/initialized` pass anonymously; `tools/list`
+and `tools/call` still require a Bearer token, because the auth middleware checks
+every request and the anonymous session is rejected on the next hop. The cost is
+that serverInfo (name, version) and the instructions text become readable without
+authentication. The tool list is unaffected. Disabled by default.
+
 For automation or a client that does not use OAuth, generate a static token:
 
 ```bash
@@ -241,6 +258,7 @@ RB_USER
 RB_PASSWORD_HASH
 RB_STATIC_TOKEN
 RB_AUTH_DISABLED
+RB_ALLOW_ANON_INITIALIZE
 RB_LOG_LEVEL
 RB_LOG_FORMAT
 ```
@@ -253,7 +271,7 @@ The most commonly changed settings are:
 |---|---|
 | Listener / public URL | `server.listen`, `server.base_url` |
 | Login accounts | `auth.users`, `auth.session_cookie_ttl` |
-| Client registration | `auth.allow_dynamic_registration`, `auth.registration_token` |
+| Client registration | `auth.allow_dynamic_registration`, `auth.registration_token`, `auth.allow_unauthenticated_initialize` |
 | MCP tools | `tools.disabled` |
 | Shell execution | `tools.shell.default_workdir`, timeouts, `max_background`, `env` |
 | File access | `policy.write_deny_paths`, `policy.read_deny_paths` |

@@ -1,13 +1,20 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/subtle"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
 	"github.com/noir017/runabout/internal/mcp"
 )
+
+// initProbeLimit 是为判断"这是不是 initialize"而预读的上限。
+// 握手包只有一两百字节，超过这个量的一定不是，不必把整个 body 读进内存。
+const initProbeLimit = 64 << 10
 
 // Protect 是资源服务器侧的 Bearer 校验中间件。
 //
@@ -32,6 +39,14 @@ func (s *Server) Protect(next http.Handler) http.Handler {
 		}
 		raw := bearer(r)
 		if raw == "" {
+			// 见 config.Auth.AllowUnauthenticatedInitialize：只放握手本身，
+			// 别的方法一律照旧要令牌，匿名会话在下一跳就会被这里挡住。
+			if s.cfg.Auth.AllowUnauthenticatedInitialize && isHandshake(r) {
+				next.ServeHTTP(w, mcp.RequestWithPrincipal(r, mcp.Principal{
+					Subject: "anonymous", Method: "anon-handshake",
+				}))
+				return
+			}
 			s.challenge(w, "invalid_request", "缺少 Authorization: Bearer <token> 请求头")
 			return
 		}
@@ -62,6 +77,31 @@ func (s *Server) Protect(next http.Handler) http.Handler {
 			Subject: tok.Subject, ClientID: tok.ClientID, TokenID: tok.Hash[:12], Method: "oauth",
 		}))
 	})
+}
+
+// isHandshake 判断请求体是不是 MCP 握手（initialize 或紧随其后的
+// notifications/initialized）。读过的字节会原样接回 r.Body，下游照常能再读一遍。
+func isHandshake(r *http.Request) bool {
+	if r.Method != http.MethodPost || r.Body == nil {
+		return false
+	}
+	orig := r.Body
+	head, err := io.ReadAll(io.LimitReader(orig, initProbeLimit))
+	// 无论解析结果如何都要把流接回去：前半截来自已读缓冲，后半截还在原 Body 里。
+	r.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(head), orig), orig}
+	if err != nil {
+		return false
+	}
+	var probe struct {
+		Method string `json:"method"`
+	}
+	if json.Unmarshal(head, &probe) != nil {
+		return false
+	}
+	return probe.Method == "initialize" || probe.Method == "notifications/initialized"
 }
 
 func (s *Server) resourceMatches(res string) bool {

@@ -54,6 +54,13 @@ auth:
   # 浏览器登录态有效期，用于再次授权时免密。设为 0 表示每次都要输密码。
   session_cookie_ttl: 12h
 
+  # 放行不带令牌的 initialize 握手。默认关。
+  # 有些客户端（实测 Gemini 的自定义连接器）在校验"这个 URL 是不是 MCP 服务器"
+  # 时会先裸发一次 initialize，拿到 401 就判定无效，不会去走 WWW-Authenticate
+  # 指出的 OAuth 流程。打开后代价是 serverInfo 与 instructions 对匿名可见，
+  # 工具清单不受影响（tools/list、tools/call 仍要 Bearer）。
+  allow_unauthenticated_initialize: false
+
   # 绕过 OAuth 的长期令牌，方便 curl 自检或别的 agent 直连。
   # 用 `runabout gen-token` 生成。不需要就留空。
   static_tokens: []

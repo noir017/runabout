@@ -35,7 +35,10 @@ type harness struct {
 	reqID     int
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T) *harness { return newHarnessWith(t, nil) }
+
+// newHarnessWith 在装配前留一次改配置的机会，用来钉住开关型行为。
+func newHarnessWith(t *testing.T, tweak func(*config.Config)) *harness {
 	t.Helper()
 	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
 	if err != nil {
@@ -54,6 +57,9 @@ func newHarness(t *testing.T) *harness {
 	cfg.Auth.Users = []config.User{{Username: "tester", PasswordHash: string(hash)}}
 	cfg.Tools.Shell.DefaultWorkdir = workdir
 	cfg.Audit.File = filepath.Join(cfg.Server.DataDir, "audit.jsonl")
+	if tweak != nil {
+		tweak(cfg)
+	}
 
 	built, err := app.Build(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -335,6 +341,52 @@ func TestUnauthorizedChallenge(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusUnauthorized {
 		t.Errorf("伪造令牌应返回 401，实际 %d", resp2.StatusCode)
+	}
+}
+
+// TestUnauthenticatedInitialize 钉住 auth.allow_unauthenticated_initialize 的边界。
+//
+// 打开后只有握手能匿名通过，其余方法必须照旧 401 —— 一旦这条松掉，
+// 等于把整台机器的 shell 敞开给任何能访问到 URL 的人。
+func TestUnauthenticatedInitialize(t *testing.T) {
+	const initBody = `{"jsonrpc":"2.0","id":0,"method":"initialize","params":` +
+		`{"protocolVersion":"2025-06-18","capabilities":{},` +
+		`"clientInfo":{"name":"probe","version":"0"}}}`
+
+	post := func(h *harness, body string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, h.base+"/mcp", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		resp, err := h.srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	on := newHarnessWith(t, func(cfg *config.Config) {
+		cfg.Auth.AllowUnauthenticatedInitialize = true
+	})
+
+	resp := post(on, initBody)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("开关打开时匿名 initialize 应为 200，实际 %d", resp.StatusCode)
+	}
+
+	resp2 := post(on, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("匿名 tools/list 必须 401，实际 %d", resp2.StatusCode)
+	}
+
+	// 默认必须是关的：同一个握手包在默认配置下照样 401。
+	off := newHarness(t)
+	resp3 := post(off, initBody)
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusUnauthorized {
+		t.Errorf("开关默认关时匿名 initialize 必须 401，实际 %d", resp3.StatusCode)
 	}
 }
 

@@ -160,6 +160,7 @@ RB_USER
 RB_PASSWORD_HASH
 RB_STATIC_TOKEN
 RB_AUTH_DISABLED
+RB_ALLOW_ANON_INITIALIZE
 RB_LOG_LEVEL
 RB_LOG_FORMAT
 ```
@@ -334,6 +335,21 @@ auth:
   registration_token: "..."
 ```
 
+有些客户端在"验证这个 URL 是不是 MCP 服务器"的阶段会先裸发一次 `initialize`，
+拿到 401 就直接判定无效，不会去读 `WWW-Authenticate` 里指出的 OAuth 入口。
+实测 **Gemini 的自定义连接器**就是这样：`User-Agent: Google`，从 Google 服务端直连，
+既不带 `Origin` 也不带 `Authorization`。这种客户端需要放行握手本身：
+
+```yaml
+auth:
+  allow_unauthenticated_initialize: true
+```
+
+只有 `initialize` 与 `notifications/initialized` 能匿名通过，`tools/list`、`tools/call`
+仍然要求 Bearer —— 鉴权中间件对每个请求都校验，匿名握手建立的会话在下一跳照样被挡。
+代价是 serverInfo（名字、版本）与 instructions 文本对匿名访问可见，工具清单不受影响。
+默认关闭。
+
 对于不使用 OAuth 的客户端，runabout 也支持静态 Bearer Token：
 
 ```bash
@@ -428,7 +444,7 @@ runabout version                  显示版本信息
 |---|---|
 | 监听 / 公网 URL | `server.listen`、`server.base_url`、`RB_*` |
 | 身份认证 | `auth.users`、`auth.session_cookie_ttl` |
-| 客户端注册 | `auth.allow_dynamic_registration`、`auth.registration_token` |
+| 客户端注册 | `auth.allow_dynamic_registration`、`auth.registration_token`、`auth.allow_unauthenticated_initialize` |
 | 禁用工具 | `tools.disabled` |
 | Shell | `tools.shell.default_workdir`、timeout、`max_background`、`env` |
 | 文件访问 | `policy.write_deny_paths`、`policy.read_deny_paths` |

@@ -72,6 +72,16 @@ type Auth struct {
 	SessionCookieTTL  time.Duration `yaml:"session_cookie_ttl"`
 	// StaticTokens 是绕过 OAuth 的长期令牌，方便 curl 调试或别的 agent 直连。
 	StaticTokens []StaticToken `yaml:"static_tokens"`
+	// AllowUnauthenticatedInitialize 放行不带令牌的 initialize 握手（仅它一个）。
+	//
+	// 有些客户端在"验证这个 URL 是不是 MCP 服务器"的阶段会先裸发一次 initialize，
+	// 拿到 401 就直接判定无效，根本不会去读 WWW-Authenticate 里的 OAuth 入口
+	// —— Gemini 的自定义连接器实测就是这样（User-Agent: Google，服务端直连，
+	// 不带 Origin 也不带 Authorization）。打开后它才走得到"下一步"那个授权页。
+	//
+	// 代价：serverInfo（名字、版本）与 instructions 文本对匿名访问可见。
+	// 工具清单不受影响 —— tools/list 与 tools/call 仍然要求 Bearer。
+	AllowUnauthenticatedInitialize bool `yaml:"allow_unauthenticated_initialize"`
 }
 
 type StaticToken struct {
@@ -258,6 +268,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("RB_STATIC_TOKEN"); v != "" {
 		cfg.Auth.StaticTokens = append(cfg.Auth.StaticTokens, StaticToken{Name: "env", Token: v})
+	}
+	if v := os.Getenv("RB_ALLOW_ANON_INITIALIZE"); v == "1" || v == "true" {
+		cfg.Auth.AllowUnauthenticatedInitialize = true
 	}
 }
 
