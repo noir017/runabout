@@ -88,8 +88,62 @@ func TestVisionDescribeFailure(t *testing.T) {
 
 	v := &Vision{BaseURL: srv.URL, Model: "m"}
 	_, err := v.Describe(context.Background(), []byte("x"), "image/png")
-	if err == nil || !strings.Contains(err.Error(), "upstream unavailable") {
-		t.Fatalf("应返回接口错误，实际 %v", err)
+	if err == nil || !strings.Contains(err.Error(), "502") {
+		t.Fatalf("应返回 HTTP 状态，实际 %v", err)
+	}
+}
+
+func TestVisionDescribeRedactsSecrets(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad key ` + r.Header.Get("Authorization") +
+			` body SECRET-BODY"}}`))
+	}))
+	defer srv.Close()
+
+	base := strings.Replace(srv.URL, "http://", "http://alice:hunter2@", 1) + "/v1"
+	v := &Vision{BaseURL: base, Model: "m", APIKey: "SECRET-KEY"}
+	_, err := v.Describe(context.Background(), []byte("x"), "image/png")
+	if err == nil {
+		t.Fatal("应返回错误")
+	}
+	for _, secret := range []string{"SECRET-BODY", "SECRET-KEY", "hunter2", "alice"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("错误文本泄露了 %q: %s", secret, err)
+		}
+	}
+}
+
+func TestVisionDescribeAPIErrorRedacts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"error":{"message":"SECRET-BODY"}}`))
+	}))
+	defer srv.Close()
+
+	v := &Vision{BaseURL: srv.URL, Model: "m"}
+	_, err := v.Describe(context.Background(), []byte("x"), "image/png")
+	if err == nil {
+		t.Fatal("应返回错误")
+	}
+	if strings.Contains(err.Error(), "SECRET-BODY") {
+		t.Errorf("错误文本泄露了上游响应体: %s", err)
+	}
+}
+
+func TestVisionDescribeTransportErrorRedacts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	base := strings.Replace(srv.URL, "http://", "http://alice:hunter2@", 1)
+	srv.Close()
+
+	v := &Vision{BaseURL: base, Model: "m", APIKey: "SECRET-KEY", Timeout: 100 * time.Millisecond}
+	_, err := v.Describe(context.Background(), []byte("x"), "image/png")
+	if err == nil {
+		t.Fatal("连接已关闭的服务应报错")
+	}
+	for _, secret := range []string{"SECRET-KEY", "hunter2", "alice"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("错误文本泄露了 %q: %s", secret, err)
+		}
 	}
 }
 

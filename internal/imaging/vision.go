@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -63,7 +64,7 @@ func (v *Vision) Describe(ctx context.Context, data []byte, mime string) (string
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("构造视觉请求失败: %w", err)
+		return "", fmt.Errorf("构造视觉请求失败: %s", v.sanitize(err.Error()))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if v.APIKey != "" {
@@ -76,16 +77,17 @@ func (v *Vision) Describe(ctx context.Context, data []byte, mime string) (string
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("调用视觉接口失败: %w", err)
+		return "", fmt.Errorf("调用视觉接口失败: %s", v.sanitize(err.Error()))
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return "", fmt.Errorf("读取视觉接口响应失败: %w", err)
+		return "", fmt.Errorf("读取视觉接口响应失败: %s", v.sanitize(err.Error()))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("视觉接口返回 HTTP %d: %s", resp.StatusCode, apiErrorText(raw))
+		// 响应体可能回显请求头或上游的内部信息，不回给模型。
+		return "", fmt.Errorf("视觉接口返回 HTTP %d（响应体已省略）", resp.StatusCode)
 	}
 
 	var out struct {
@@ -102,7 +104,7 @@ func (v *Vision) Describe(ctx context.Context, data []byte, mime string) (string
 		return "", fmt.Errorf("解析视觉接口响应失败: %w", err)
 	}
 	if out.Error != nil && out.Error.Message != "" {
-		return "", fmt.Errorf("视觉接口报错: %s", out.Error.Message)
+		return "", fmt.Errorf("视觉接口返回错误（详情已省略）")
 	}
 	if len(out.Choices) == 0 {
 		return "", fmt.Errorf("视觉接口没有返回结果")
@@ -133,21 +135,36 @@ func contentText(raw json.RawMessage) string {
 	return ""
 }
 
-func apiErrorText(raw []byte) string {
-	var e struct {
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
+// sanitize 从错误文本里抹掉 API key 和 BaseURL 的 userinfo/query。
+// 这些信息可能出现在 http.Client 的 URL 错误里，不能回给模型。
+func (v *Vision) sanitize(s string) string {
+	if v.APIKey != "" {
+		s = strings.ReplaceAll(s, v.APIKey, "***")
 	}
-	if json.Unmarshal(raw, &e) == nil && e.Error != nil && e.Error.Message != "" {
-		return e.Error.Message
+	u, err := url.Parse(v.BaseURL)
+	if err != nil {
+		s = strings.ReplaceAll(s, v.BaseURL, "视觉接口")
+		return s
 	}
-	s := strings.TrimSpace(string(raw))
-	if len(s) > 300 {
-		s = s[:300] + "…"
+	safe := *u
+	safe.User = nil
+	safe.RawQuery = ""
+	safe.Fragment = ""
+	s = strings.ReplaceAll(s, v.BaseURL, safe.String())
+	if u.User != nil {
+		// net/http 在 url.Error 里会把密码换成 ***，这个变体也要替换掉。
+		if _, ok := u.User.Password(); ok {
+			stripped := strings.Replace(u.String(),
+				u.User.String()+"@", u.User.Username()+":***@", 1)
+			s = strings.ReplaceAll(s, stripped, safe.String())
+		}
+		s = strings.ReplaceAll(s, u.User.String(), "***")
+		if pass, ok := u.User.Password(); ok {
+			s = strings.ReplaceAll(s, pass, "***")
+		}
 	}
-	if s == "" {
-		return "(空响应)"
+	if u.RawQuery != "" {
+		s = strings.ReplaceAll(s, u.RawQuery, "***")
 	}
 	return s
 }
