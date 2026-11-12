@@ -109,6 +109,7 @@ fleet:
   hosts:
     - name: web1
       desc: 对外服务宿主
+      workdir: /srv/app      # 可选；不写就是远端用户的家目录
     - name: nas
       desc: 家庭 NAS
       approval: true

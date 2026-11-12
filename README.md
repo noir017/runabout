@@ -39,16 +39,16 @@ Typical uses:
 
 The important security boundary is the process identity. If runabout runs as `root`, the agent effectively has root access. Prefer a dedicated user, container, filesystem mounts, and narrowly scoped sudo rules.
 
-## Eight core tools
+## Core tools
 
-The default MCP surface is intentionally limited to **8 tools**. Some older implementations still exist in the source tree, but they are not exposed by default.
+The default MCP surface is limited to **7 tools**. `servers` is added only when `fleet.hosts` is configured. Some older implementations still exist in the source tree, but they are not exposed by default.
 
 | Tool | Purpose |
 |---|---|
 | `shell` | Run a Bash command in the configured environment; supports foreground and background jobs. |
 | `shell_output` | Read captured stdout/stderr from a background job. |
 | `shell_kill` | Send a signal to a background job and terminate it. |
-| `servers` | Probe one machine or all configured machines: load, memory, root disk, containers, failed units. |
+| `servers` | With fleet configured: probe one machine or all machines (load, memory, root disk, containers, failed units). |
 | `read` | Read files, with line numbers and bounded output. |
 | `apply_patch` | Make precise, context-aware file changes without replacing an entire file. |
 | `search` | Search file contents using regular expressions. |
@@ -75,12 +75,13 @@ fleet:
   hosts:
     - name: web1
       desc: public web host
+      workdir: /srv/app        # optional; defaults to the remote user's home
     - name: nas
       desc: home NAS
       approval: true
 ```
 
-With `hosts` non-empty, `shell`, `read`, `search`, `glob`, `apply_patch` and `servers` gain a `target` parameter whose enum lists the machines plus `local`. Without it, no `target` appears and behavior is unchanged. `servers` probes all hosts in parallel (30-second cache) or returns one host's snapshot.
+Each host can set `workdir`; relative paths on that host resolve there, and without it they resolve to the remote user's home. With `hosts` non-empty, `servers` is added and `shell`, `read`, `search`, `glob`, `apply_patch` gain a `target` parameter whose enum lists the machines plus `local`. Without it, no `target` appears and behavior matches the single-machine version; the only intentional change is that `shell` no longer duplicates stdout/stderr in `structuredContent`. `servers` probes all hosts in parallel (30-second cache) or returns one host's snapshot.
 
 Hosts marked `approval: true` are probed only when `approval_check` exits 0; otherwise they show as needing approval. runabout does not implement approval — the ssh layer blocks until the user approves.
 
@@ -373,7 +374,7 @@ internal/audit        JSONL audit logging
 internal/config       YAML configuration and validation
 ```
 
-To add a tool, implement `mcp.Handler` (`Definition()` + `Call()`) and register it in `tools.All()`. Keep the default tool surface small; a new tool should provide a capability that cannot be expressed cleanly by the existing eight.
+To add a tool, implement `mcp.Handler` (`Definition()` + `Call()`) and register it in `tools.All()`. Keep the default tool surface small; a new tool should provide a capability that cannot be expressed cleanly by the existing tools.
 
 `configs/config.example.yaml` is parsed in strict mode by tests, so keep it synchronized with the configuration structs.
 

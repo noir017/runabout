@@ -114,6 +114,7 @@ fleet:
   #  - name: web1
   #    desc: 对外服务宿主
   #    ssh: web1              # 不写就与 name 相同
+  #    workdir: /srv/app      # 不写就是远端登录用户的家目录
   #    approval: false
   #  - name: nas
   #    desc: 家庭 NAS / 容器主力
