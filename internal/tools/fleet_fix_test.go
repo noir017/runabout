@@ -173,3 +173,27 @@ func TestRemoteSearchAndGlobRelativeUseHostWorkdir(t *testing.T) {
 }
 
 // ---------- 3. ~ 展开 ----------
+
+func TestRemoteWorkdirAnchorsHome(t *testing.T) {
+	d, _ := newFleetDeps(t, config.Fleet{Hosts: []config.FleetHost{
+		{Name: "web1", Workdir: "~/../.."},
+	}})
+	tgt, err := d.resolveTarget("web1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := d.remoteWorkdir(tgt); got != "~" {
+		t.Errorf("~/../.. 应锚定成 ~，得到 %q", got)
+	}
+}
+
+func TestRemoteShellWorkdirTraversalAnchorsHome(t *testing.T) {
+	home := t.TempDir()
+	d, _ := newFleetDepsEnv(t, config.Fleet{Hosts: []config.FleetHost{
+		{Name: "web1", Workdir: "~/../.."},
+	}}, map[string]string{"HOME": home})
+	out, isErr := call(t, &shellTool{d: d}, map[string]any{"target": "web1", "command": "pwd"})
+	if isErr || !strings.Contains(out, home) {
+		t.Errorf("shell 的 workdir 也应锚定在家目录 %s: %s", home, out)
+	}
+}

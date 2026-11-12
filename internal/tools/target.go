@@ -178,11 +178,16 @@ func auditTarget(t targetInfo) string {
 }
 
 // remoteWorkdir 是远端 shell 和文件工具共用的默认工作目录。
+// ~/... 形式也走 anchorHome，保证 cd 和文件工具的基准一致。
 func (d *Deps) remoteWorkdir(t targetInfo) string {
-	if t.host.Workdir != "" {
-		return t.host.Workdir
+	wd := t.host.Workdir
+	if wd == "" || wd == "~" {
+		return "~"
 	}
-	return "~"
+	if strings.HasPrefix(wd, "~/") {
+		return anchorHome(strings.TrimPrefix(wd, "~"))
+	}
+	return wd
 }
 
 // resolveReadPath / resolveWritePath 统一本机与远端的路径解析：
