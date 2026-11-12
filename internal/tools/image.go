@@ -16,9 +16,14 @@ import (
 // prefix 是 [host] 前缀，target 是结构化输出里的机器名（单机模式为空）。
 func (t *readTool) readImage(cc *mcp.CallContext, prefix, abs, mime string, data []byte, target string) *mcp.CallToolResult {
 	fs := t.d.Cfg.Tools.FS
-	res, err := imaging.Process(data, imaging.Options{
-		MaxEdge:  fs.ImageMaxEdge,
-		MaxBytes: fs.MaxImageBytes,
+	var res *imaging.Result
+	var err error
+	withImageSlot(t.sem, func() {
+		res, err = imaging.Process(data, imaging.Options{
+			MaxEdge:   fs.ImageMaxEdge,
+			MaxBytes:  fs.MaxImageBytes,
+			MaxPixels: fs.MaxImagePixels,
+		})
 	})
 	if err != nil {
 		return mcp.ToolError("%s处理图片 %s 失败: %v", prefix, abs, err)
@@ -92,4 +97,51 @@ func describeImage(cc *mcp.CallContext, vc config.VisionCfg, data []byte, mime s
 	}
 	v := &imaging.Vision{BaseURL: vc.BaseURL, Model: vc.Model, APIKey: key, Timeout: vc.Timeout}
 	return v.Describe(cc.Ctx, data, mime)
+}
+
+// detectImageMime 读文件头判断是不是支持的图片。不能只看扩展名：
+// 改名成 .png 的大文本文件会被误当成图片，绕过 max_read_bytes 整个读进内存。
+func detectImageMime(path string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(f, head)
+	if n == 0 {
+		return "", false
+	}
+	head = head[:n]
+	ct := http.DetectContentType(head)
+	switch ct {
+	case "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp":
+		return ct, true
+	}
+	// DetectContentType 对 BMP/WebP 的覆盖随版本可能不同，补一手签名。
+	if len(head) >= 2 && head[0] == 'B' && head[1] == 'M' {
+		return "image/bmp", true
+	}
+	if len(head) >= 12 && string(head[0:4]) == "RIFF" && string(head[8:12]) == "WEBP" {
+		return "image/webp", true
+	}
+	return "", false
+}
+
+// withImageSlot 限制同时处理的图片张数；sem 为 nil 时不限制（测试里直接构造 readTool）。
+func withImageSlot(sem chan struct{}, fn func()) {
+	if sem == nil {
+		fn()
+		return
+	}
+	sem <- struct{}{}
+	defer func() { <-sem }()
+	fn()
+}
+
+func imageConcurrency(cfg *config.Config) int {
+	if n := cfg.Tools.FS.MaxImageConcurrency; n > 0 {
+		return n
+	}
+	return 2
 }

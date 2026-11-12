@@ -15,7 +15,10 @@ import (
 
 // ---------- read ----------
 
-type readTool struct{ d *Deps }
+type readTool struct {
+	d   *Deps
+	sem chan struct{}
+}
 
 type readArgs struct {
 	Target string `json:"target"`

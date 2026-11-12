@@ -100,6 +100,10 @@ tools:
     max_image_source_bytes: 33554432
     # 读图时自动缩放的长边上限（像素）。
     image_max_edge: 2000
+    # 解码前的像素数上限，防止小文件解出巨图。
+    max_image_pixels: 30000000
+    # 同时处理的图片张数上限。
+    max_image_concurrency: 2
 
     # 可选：读图后追加一段视觉模型生成的文字描述，用于客户端看不到图片时兜底。
     # base_url 和 model 都填才启用，默认关闭。接口需兼容 OpenAI 的 /chat/completions。

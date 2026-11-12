@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -135,6 +137,95 @@ func TestReadImageSourceLimit(t *testing.T) {
 	}
 }
 
+// 图片判定必须看 magic：扩展名是 .txt 的 PNG 也要按图片处理。
+func TestReadImageMagicOverridesExtension(t *testing.T) {
+	d, dir := newTestDeps(t)
+	d.Cfg.Tools.FS.MaxReadBytes = 50
+	d.Cfg.Tools.FS.MaxImageSourceBytes = 1 << 20
+	path := filepath.Join(dir, "shot.txt")
+	writePNG(t, path, 120, 80)
+
+	res := callRaw(t, &readTool{d: d}, map[string]any{"path": path})
+	if res.IsError {
+		t.Fatalf("magic 是 PNG 的文件应按图片读取: %s", textOf(res))
+	}
+	if _, mime := findImage(t, res); mime != "image/png" {
+		t.Errorf("应按 PNG 返回，实际 %s", mime)
+	}
+}
+
+// 扩展名是 .png 的大文本不能走图片的宽松上限。
+func TestReadFakeImageUsesTextLimit(t *testing.T) {
+	d, dir := newTestDeps(t)
+	d.Cfg.Tools.FS.MaxReadBytes = 50
+	d.Cfg.Tools.FS.MaxImageSourceBytes = 1 << 20
+	path := filepath.Join(dir, "fake.png")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("a"), 200), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, isErr := call(t, &readTool{d: d}, map[string]any{"path": path})
+	if !isErr {
+		t.Fatal("改名成 .png 的文本文件应按文本大小上限拒绝")
+	}
+	if !strings.Contains(out, "超过单次读取上限") {
+		t.Errorf("应命中 max_read_bytes 而不是图片上限:\n%s", out)
+	}
+}
+
+func TestReadImagePixelLimitFromConfig(t *testing.T) {
+	d, dir := newTestDeps(t)
+	d.Cfg.Tools.FS.MaxImagePixels = 100
+	path := filepath.Join(dir, "small.png")
+	writePNG(t, path, 20, 20) // 400 像素
+
+	out, isErr := call(t, &readTool{d: d}, map[string]any{"path": path})
+	if !isErr || !strings.Contains(out, "像素") {
+		t.Errorf("配置的像素上限应生效:\n%s", out)
+	}
+}
+
+func TestImageSemaphore(t *testing.T) {
+	sem := make(chan struct{}, 1)
+	var active, peak int32
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			withImageSlot(sem, func() {
+				cur := atomic.AddInt32(&active, 1)
+				for {
+					p := atomic.LoadInt32(&peak)
+					if cur <= p || atomic.CompareAndSwapInt32(&peak, p, cur) {
+						break
+					}
+				}
+				time.Sleep(20 * time.Millisecond)
+				atomic.AddInt32(&active, -1)
+			})
+		}()
+	}
+	wg.Wait()
+	if peak != 1 {
+		t.Errorf("信号量为 1 时同时处理数应为 1，实际 %d", peak)
+	}
+}
+
+func TestReadToolSemaphoreWiring(t *testing.T) {
+	d, _ := newTestDeps(t)
+	d.Cfg.Tools.FS.MaxImageConcurrency = 3
+	var rt *readTool
+	for _, h := range All(d) {
+		if r, ok := h.(*readTool); ok {
+			rt = r
+		}
+	}
+	if rt == nil || cap(rt.sem) != 3 {
+		t.Errorf("readTool 应按配置初始化信号量，实际 %+v", rt)
+	}
+}
+
 func TestReadImagePixelBomb(t *testing.T) {
 	d, dir := newTestDeps(t)
 	path := filepath.Join(dir, "bomb.png")
@@ -195,8 +286,8 @@ func TestReadImageVisionFailureKeepsImage(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("视觉描述失败不应让读图失败: %s", textOf(res))
 	}
-	if !strings.Contains(textOf(res), "视觉描述失败") || !strings.Contains(textOf(res), "upstream down") {
-		t.Errorf("应注明失败原因:\n%s", textOf(res))
+	if !strings.Contains(textOf(res), "视觉描述失败") || !strings.Contains(textOf(res), "HTTP 500") {
+		t.Errorf("应注明失败原因（状态码），且不回显响应体:\n%s", textOf(res))
 	}
 	if _, mime := findImage(t, res); mime != "image/png" {
 		t.Errorf("图片本身应照常返回，实际 %s", mime)

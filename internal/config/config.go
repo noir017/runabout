@@ -154,6 +154,10 @@ type FSCfg struct {
 	MaxImageSourceBytes int `yaml:"max_image_source_bytes"`
 	// ImageMaxEdge 是读图时自动缩放的长边上限（像素）。
 	ImageMaxEdge int `yaml:"image_max_edge"`
+	// MaxImagePixels 是解码前的像素数上限，用来挡住解压炸弹。
+	MaxImagePixels int `yaml:"max_image_pixels"`
+	// MaxImageConcurrency 限制同时处理的图片张数。
+	MaxImageConcurrency int `yaml:"max_image_concurrency"`
 	// Vision 是读图后的可选视觉描述。BaseURL 与 Model 都非空才启用。
 	Vision VisionCfg `yaml:"vision"`
 }
@@ -250,6 +254,8 @@ func Default() *Config {
 				MaxImageBytes:       4 << 20,
 				MaxImageSourceBytes: 32 << 20,
 				ImageMaxEdge:        2000,
+				MaxImagePixels:      30_000_000,
+				MaxImageConcurrency: 2,
 				Vision:              VisionCfg{Timeout: 30 * time.Second},
 			},
 			Search: SearchCfg{
@@ -375,6 +381,12 @@ func (c *Config) Normalize() error {
 	}
 	if c.Tools.FS.ImageMaxEdge <= 0 {
 		c.Tools.FS.ImageMaxEdge = 2000
+	}
+	if c.Tools.FS.MaxImagePixels <= 0 {
+		c.Tools.FS.MaxImagePixels = 30_000_000
+	}
+	if c.Tools.FS.MaxImageConcurrency <= 0 {
+		c.Tools.FS.MaxImageConcurrency = 2
 	}
 	if c.Tools.FS.Vision.Timeout <= 0 {
 		c.Tools.FS.Vision.Timeout = 30 * time.Second

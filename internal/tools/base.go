@@ -41,7 +41,7 @@ func All(d *Deps) []mcp.Handler {
 		&shellTool{d: d},
 		&shellOutputTool{d: d},
 		&shellKillTool{d: d},
-		&readTool{d: d},
+		&readTool{d: d, sem: make(chan struct{}, imageConcurrency(d.Cfg))},
 		&applyPatchTool{d: d},
 		&searchTool{d: d},
 		&globTool{d: d},
