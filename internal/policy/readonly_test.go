@@ -96,6 +96,8 @@ func TestReadOnlyAllows(t *testing.T) {
 		"sudo ls /tmp",
 		"ls && df -h",
 		"cat /etc/hosts; df -h",
+		"ls ~",
+		"cat ~/notes.txt",
 	}
 	for _, cmd := range allowed {
 		if err := CheckReadOnly(cmd); err != nil {
@@ -160,6 +162,13 @@ func TestReadOnlyRejects(t *testing.T) {
 		"date 010100002026",
 		"cat <<EOF\n$(rm -rf /tmp/x)\nEOF",
 		"> /tmp/out",
+		"> pwn.txt; ls",
+		">> pwn.txt; ls",
+		"2> pwn.txt; ls",
+		"cat $'\\057etc\\057shadow'",
+		"cat ~user/.ssh/id_rsa",
+		"cat < ~user/.ssh/id_rsa",
+		"ss -P -D x",
 		// 选项缩写/前缀不能绕过长选项白名单。
 		"sort --out=/tmp/x file",
 		"sort --output=/tmp/x file",

@@ -46,10 +46,20 @@ func checkReadOnlyAST(src string) error {
 			return false
 		}
 		switch n := node.(type) {
-		case *syntax.File, *syntax.Word, *syntax.Lit, *syntax.SglQuoted,
-			*syntax.DblQuoted, *syntax.ParamExp, *syntax.Redirect, *syntax.Comment:
+		case *syntax.File, *syntax.Word, *syntax.Lit, *syntax.DblQuoted,
+			*syntax.ParamExp, *syntax.Redirect, *syntax.Comment:
+			return true
+		case *syntax.SglQuoted:
+			if n.Dollar {
+				bad = "ANSI-C 转义词 $'...'"
+				return false
+			}
 			return true
 		case *syntax.Stmt:
+			if n.Cmd == nil {
+				bad = "只有重定向、没有命令的语句"
+				return false
+			}
 			if n.Background || n.Coprocess || n.Disown {
 				bad = "后台或协程语句"
 				return false
@@ -125,6 +135,16 @@ func checkReadOnlyCmd(c *Cmd) error {
 	if strings.ContainsRune(argv[0], '/') {
 		return fmt.Errorf("命令名 %q 带路径，只读查询只接受白名单里的命令名", argv[0])
 	}
+	for _, a := range argv {
+		if badTilde(a) {
+			return fmt.Errorf("参数 %q 用了无法展开的 ~ 用户家目录写法，只读查询不允许", a)
+		}
+	}
+	for _, r := range c.Redirects {
+		if badTilde(r.Target) {
+			return fmt.Errorf("重定向目标 %q 用了无法展开的 ~ 用户家目录写法，只读查询不允许", r.Target)
+		}
+	}
 	if len(c.Assigns) > 0 {
 		return fmt.Errorf("命令带变量赋值前缀（%s=...），会改变被调命令的行为，只读查询不允许",
 			c.Assigns[0])
@@ -150,6 +170,11 @@ func checkReadOnlyCmd(c *Cmd) error {
 		return spec.check(argv[1:])
 	}
 	return nil
+}
+
+// badTilde 拒绝 ~user 这类 ExpandHome 不处理的写法；~ 和 ~/ 仍放行。
+func badTilde(s string) bool {
+	return strings.HasPrefix(s, "~") && s != "~" && !strings.HasPrefix(s, "~/")
 }
 
 // readOnlyRedirect 只放行读入和文件描述符复制；>、>>、&> 等写重定向一律拒绝。
@@ -366,9 +391,9 @@ var readonlySpecs = map[string]cmdSpec{
 			summary numeric resolve family address no-header oneline extended ipv4 ipv6 wide
 			bytes help version`),
 		short:         "hVnraloempsitu46012389bcEfFgMNPqTwxyzZAd",
-		shortValue:    "AfFNP",
+		shortValue:    "AfFN",
 		longValue:     set(`state exclude family address`),
-		shortRequired: "AfFNP",
+		shortRequired: "AfFN",
 	},
 	"ip": {custom: checkIP},
 	"journalctl": {
