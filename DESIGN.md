@@ -98,6 +98,8 @@ e2e 测试里专门验了这一条。
 
 - `eval "$CMD"`、`$(curl …)` 这类内容运行时才确定的命令，静态分析看不到。做法是把这类
   "证明不了安全"的情况归到 confirm（`eval-dynamic` 规则），而不是假装安全。
+- `$'...'`（ANSI-C 转义）在共享解析器里不解码，`shellrules` 只能按原始文本匹配，真实路径以
+  bash 解码结果为准；这是 shell 规则的已知边界。query 直接拒绝这类词。
 - 拿到 shell 的人可以写个脚本文件再执行，脚本内容不过规则。这不是漏洞而是设计：
   shell 按需求就是完整权限，拦截层的目标是**挡住误操作和顺手的灾难**，
   不是防御一个存心搞破坏的对手。真要防后者，需要的是容器隔离和只读挂载，不是命令过滤。
@@ -167,7 +169,8 @@ readOnlyHint / idempotentHint、destructiveHint=false，让模型有一个不弹
 
 它不执行任意命令。`internal/policy/readonly.go` 按 AST 节点类型做允许列表，只放行简单命令、
 管道（|、|&）、&&、||、;。赋值语句、声明语句（export/declare/readonly/local/typeset）、函数定义、
-子 shell、块、算术、test 子句、if/for/while/case、后台 & 一律拒绝。
+子 shell、块、算术、test 子句、if/for/while/case、后台 &、只有重定向没有命令的语句、`$'...'`
+一律拒绝。
 
 完整命令清单：ls、cat、head、tail、grep、rg、find、df、du、free、ps、uptime、ss、ip、journalctl、
 systemctl、docker、stat、file、wc、sort、uname、hostname、id、whoami、pwd、which、echo、printf、
@@ -178,7 +181,8 @@ cut、tr、dig、realpath、readlink、dirname、basename、logread。
   带值的选项会跳过下一个 token，所以 `journalctl --since '-1 hour'`、`date -d '-1 day'` 可用。
   find 的谓词单独按允许列表判定。
 - 命令名前缀只允许不带选项的 sudo（`sudo ls`）；env、timeout、nice、command、xargs、nohup 等包装
-  一律拒绝。命令名带 `/`、带变量赋值前缀（`PATH=... ls`、`LD_PRELOAD=... ls`）也一律拒绝。
+  一律拒绝。命令名带 `/`、带变量赋值前缀（`PATH=... ls`、`LD_PRELOAD=... ls`）、带 `~user/...`
+  这类 ExpandHome 不处理的写法，也一律拒绝。
 - 子命令级判定：`systemctl` 只允许 status、is-active、is-enabled、is-failed、is-system-running、
   get-default、show-environment、list-units、list-unit-files、list-timers、list-sockets、list-jobs、
   list-machines、show、cat、help；`docker` 顶层只允许 ps、images、logs、inspect、stats、version、
