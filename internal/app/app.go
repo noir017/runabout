@@ -44,7 +44,7 @@ const singleInstructions = `这是一台 Linux 服务器上的基础工具集，
 - shell：执行任意 bash 命令。长任务用 run_in_background=true，再配合 shell_output / shell_kill。
 - read / apply_patch：读文件和改文件。read 默认带行号，apply_patch 靠上下文定位。
 - search：按内容搜正则。glob：按文件名模式找文件。
-- servers：查看这台机器的负载、内存、磁盘、容器和失败的 systemd 单元。
+- servers：查看这台机器的负载、内存和根分区占用。
 
 建议的工作方式：先用 glob / search 摸清情况，用 read 确认要改的内容，
 再用 apply_patch 落改动，最后用 shell 跑测试或重启服务验证。
