@@ -83,7 +83,7 @@ fleet:
       approval: true
 ```
 
-每台机器可以配 `workdir`，相对路径按它解析；不配就是远端登录用户的家目录。配了 `hosts` 之后会加上 `servers`，`shell`、`read`、`search`、`glob`、`apply_patch` 都会多一个 `target` 参数，enum 列出全部机器名和 `local`；不配时没有 `target`，行为和单机版一致；唯一的改动是 `shell` 的 `structuredContent` 不再重复放 stdout 和 stderr。`servers` 会并行探测所有机器（结果缓存 30 秒），带 `target` 时返回单台详情。
+每台机器可以配 `workdir`，相对路径按它解析；不配就是远端登录用户的家目录。配了 `hosts` 之后会加上 `servers`，`shell`、`read`、`search`、`glob`、`apply_patch` 都会多一个 `target` 参数，enum 列出全部机器名和 `local`；不配时没有 `target`，行为和单机版有两处有意差异：`shell` 的 `structuredContent` 不再重复放 stdout 和 stderr；`read`、`search`、`glob` 补全了只读 annotations。`servers` 会并行探测所有机器（结果缓存 30 秒），带 `target` 时返回单台详情。
 
 标了 `approval: true` 的机器只有在 `approval_check` 退出 0 时才探测，否则显示"需审批"。runabout 不实现审批，审批由 ssh 层阻塞等待。
 

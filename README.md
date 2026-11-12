@@ -81,7 +81,7 @@ fleet:
       approval: true
 ```
 
-Each host can set `workdir`; relative paths on that host resolve there, and without it they resolve to the remote user's home. With `hosts` non-empty, `servers` is added and `shell`, `read`, `search`, `glob`, `apply_patch` gain a `target` parameter whose enum lists the machines plus `local`. Without it, no `target` appears and behavior matches the single-machine version; the only intentional change is that `shell` no longer duplicates stdout/stderr in `structuredContent`. `servers` probes all hosts in parallel (30-second cache) or returns one host's snapshot.
+Each host can set `workdir`; relative paths on that host resolve there, and without it they resolve to the remote user's home. With `hosts` non-empty, `servers` is added and `shell`, `read`, `search`, `glob`, `apply_patch` gain a `target` parameter whose enum lists the machines plus `local`. Without it, no `target` appears and behavior matches the single-machine version, with two intentional differences: `shell` no longer duplicates stdout/stderr in `structuredContent`, and `read`, `search`, `glob` now carry complete read-only annotations. `servers` probes all hosts in parallel (30-second cache) or returns one host's snapshot.
 
 Hosts marked `approval: true` are probed only when `approval_check` exits 0; otherwise they show as needing approval. runabout does not implement approval — the ssh layer blocks until the user approves.
 
