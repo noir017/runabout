@@ -218,6 +218,9 @@ func TestSSHPassesShellEnvToLocalProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tools.shell.env 没传给本地 ssh 进程: %v", err)
 	}
+	if !strings.Contains(string(data), "-- web1") {
+		t.Errorf("ssh 参数应在主机名前加 --: %q", data)
+	}
 	if !strings.Contains(string(data), "true") {
 		t.Errorf("桩脚本没收到远端命令: %q", data)
 	}

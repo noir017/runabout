@@ -36,9 +36,9 @@ func (s *SSH) command(ctx context.Context, spec Spec, merge bool) (*exec.Cmd, *C
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	args := make([]string, 0, len(s.prefix)+2)
+	args := make([]string, 0, len(s.prefix)+3)
 	args = append(args, s.prefix[1:]...)
-	args = append(args, spec.SSH, remote)
+	args = append(args, "--", spec.SSH, remote)
 	cmd := exec.CommandContext(ctx, s.prefix[0], args...)
 	// 远端 export 走命令字符串；本地只带 tools.shell.env，不把调用方的 env 泄漏给 ssh 本身。
 	cmd.Env = mergeEnv(s.baseEnv, nil)

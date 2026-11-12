@@ -110,15 +110,19 @@ func (t *applyPatchTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.Ca
 
 	if a.DryRun {
 		return mcp.Text(label(target) + "dry_run：补丁可以正常套用，未写入任何文件。\n\n" + summarize(plans)).
-			WithStructured(structuredPlans(target.name, plans, true)), nil
+			WithStructured(structuredPlans(auditTarget(target), plans, true)), nil
 	}
 
 	// 第二阶段：落盘。远端多文件写到一半断线无法回滚，失败时列出已写入和未写入的文件。
 	written := make([]string, 0, len(plans))
 	for i, p := range plans {
 		if err := t.commit(cc.Ctx, fsys, p); err != nil {
+			failed := p.absPath
+			if p.absMove != "" {
+				failed = p.absMove
+			}
 			var sb strings.Builder
-			fmt.Fprintf(&sb, "%s写入 %s 失败：%v\n", label(target), p.absPath, err)
+			fmt.Fprintf(&sb, "%s写入失败（可能已部分写入）：%s\n原因：%v\n", label(target), failed, err)
 			if isConnectError(err) {
 				sb.WriteString("\n" + connectHint() + "\n")
 			}
@@ -129,22 +133,26 @@ func (t *applyPatchTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.Ca
 				}
 			}
 			sb.WriteString("\n未写入：\n")
-			for _, rest := range plans[i:] {
+			for _, rest := range plans[i+1:] {
 				sb.WriteString("· " + rest.absPath + "\n")
 			}
 			sb.WriteString("\n写回无法回滚；请用 read 或 git diff 确认当前状态")
 			return mcp.ToolError("%s", strings.TrimRight(sb.String(), "\n")), nil
 		}
-		written = append(written, p.absPath)
+		if p.absMove != "" {
+			written = append(written, p.absMove)
+		} else {
+			written = append(written, p.absPath)
+		}
 	}
 	t.d.Log.Info("apply_patch 完成", "target", target.name, "files", len(plans), "user", cc.Principal.Subject)
-	return mcp.Text(label(target) + summarize(plans)).WithStructured(structuredPlans(target.name, plans, false)), nil
+	return mcp.Text(label(target) + summarize(plans)).WithStructured(structuredPlans(auditTarget(target), plans, false)), nil
 }
 
 func (t *applyPatchTool) plan(cc *mcp.CallContext, target targetInfo, fsys fleet.FS, guard *policy.PathGuard, op patchOp) (*plannedWrite, error) {
 	abs, err := resolveWritePath(t.d, target, guard, op.path)
 	if err != nil {
-		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "apply_patch", target.name, "denied", "path-deny", op.path, "", err.Error())
+		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "apply_patch", auditTarget(target), "denied", "path-deny", op.path, "", err.Error())
 		return nil, err
 	}
 	p := &plannedWrite{op: op, absPath: abs, mode: 0o644}
@@ -300,5 +308,9 @@ func structuredPlans(target string, plans []plannedWrite, dryRun bool) map[strin
 		}
 		items = append(items, item)
 	}
-	return map[string]any{"dry_run": dryRun, "target": target, "files": items}
+	meta := map[string]any{"dry_run": dryRun, "files": items}
+	if target != "" {
+		meta["target"] = target
+	}
+	return meta
 }

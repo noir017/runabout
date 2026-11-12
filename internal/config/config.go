@@ -45,6 +45,8 @@ type FleetHost struct {
 	Name string `yaml:"name"`
 	Desc string `yaml:"desc"`
 	SSH  string `yaml:"ssh"`
+	// Workdir 是这台机器的默认工作目录。留空表示登录用户的家目录（~）。
+	Workdir string `yaml:"workdir"`
 	// Approval 表示连接这台机器需要人工审批。runabout 不实现审批，
 	// 它只影响工具描述里的提示和 servers 总览是否主动去连。
 	Approval bool `yaml:"approval"`
@@ -377,6 +379,7 @@ func (c *Config) normalizeFleet() error {
 			return fmt.Errorf("fleet.hosts 里的机器名 %q 重复", h.Name)
 		}
 		seen[h.Name] = true
+		h.Workdir = strings.TrimSpace(h.Workdir)
 		if strings.TrimSpace(h.SSH) == "" {
 			h.SSH = h.Name
 		}

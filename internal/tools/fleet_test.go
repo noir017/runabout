@@ -26,6 +26,7 @@ func stubSSH(t *testing.T) string {
 	path := filepath.Join(t.TempDir(), "stub-ssh")
 	script := `#!/bin/sh
 if [ -n "$STUB_LOG" ]; then printf '%s\n' "$*" >> "$STUB_LOG"; fi
+if [ -n "$HOME" ]; then cd "$HOME" 2>/dev/null || true; fi
 for last; do :; done
 exec sh -c "$last"
 `
@@ -37,10 +38,24 @@ exec sh -c "$last"
 
 // newFleetDeps 在临时目录上叠一个假 ssh，远端命令其实在本机执行。
 func newFleetDeps(t *testing.T, cfgFleet config.Fleet) (*Deps, string) {
+	return newFleetDepsEnv(t, cfgFleet, nil)
+}
+
+func newFleetDepsEnv(t *testing.T, cfgFleet config.Fleet, env map[string]string) (*Deps, string) {
+	return newFleetDepsWithSSH(t, cfgFleet, env, "")
+}
+
+func newFleetDepsWithSSH(t *testing.T, cfgFleet config.Fleet, env map[string]string, sshPath string) (*Deps, string) {
 	t.Helper()
 	d, dir := newTestDeps(t)
+	if env != nil {
+		d.Cfg.Tools.Shell.Env = env
+	}
+	if sshPath == "" {
+		sshPath = stubSSH(t)
+	}
 	if cfgFleet.SSHCommand == nil {
-		cfgFleet.SSHCommand = []string{stubSSH(t)}
+		cfgFleet.SSHCommand = []string{sshPath}
 	}
 	if len(cfgFleet.Hosts) == 0 {
 		cfgFleet.Hosts = []config.FleetHost{{Name: "web1", Desc: "测试机", SSH: "web1"}}
@@ -160,7 +175,7 @@ func TestReadRemote(t *testing.T) {
 	if err := os.WriteFile(f, []byte("hello\nworld\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, isErr := call(t, &readTool{d: d}, map[string]any{"target": "web1", "path": "remote.txt"})
+	out, isErr := call(t, &readTool{d: d}, map[string]any{"target": "web1", "path": f})
 	if isErr {
 		t.Fatalf("远端读取失败: %s", out)
 	}
@@ -176,10 +191,11 @@ func TestReadRemoteImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "pixel.png"), png, 0o644); err != nil {
+	pixelPath := filepath.Join(dir, "pixel.png")
+	if err := os.WriteFile(pixelPath, png, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(map[string]any{"target": "web1", "path": "pixel.png"})
+	raw, _ := json.Marshal(map[string]any{"target": "web1", "path": pixelPath})
 	res, err := (&readTool{d: d}).Call(&mcp.CallContext{
 		Ctx: context.Background(), Principal: mcp.Principal{Subject: "tester"},
 	}, raw)
@@ -227,14 +243,48 @@ func TestApplyPatchRemotePartialWriteListsFiles(t *testing.T) {
 	if !isErr {
 		t.Fatalf("第二个文件写不进去时应失败: %s", out)
 	}
-	if !strings.Contains(out, "已写入") || !strings.Contains(out, good) {
-		t.Errorf("应列出已写入的文件: %s", out)
+	if !strings.Contains(out, "写入失败（可能已部分写入）") || !strings.Contains(out, bad) {
+		t.Errorf("失败的文件应单独标注: %s", out)
 	}
-	if !strings.Contains(out, "未写入") || !strings.Contains(out, bad) {
-		t.Errorf("应列出未写入的文件: %s", out)
+	writtenPart, rest, ok := strings.Cut(out, "未写入")
+	if !ok || !strings.Contains(writtenPart, "已写入") || !strings.Contains(writtenPart, good) {
+		t.Errorf("已写入部分应包含第一个文件: %s", out)
+	}
+	if strings.Contains(rest, bad) {
+		t.Errorf("失败的文件不应再列进未写入: %s", out)
 	}
 	if _, err := os.Stat(good); err != nil {
 		t.Error("第一个文件应已写入")
+	}
+}
+
+func TestApplyPatchRemoteMoveReportsTarget(t *testing.T) {
+	d, dir := newFleetDeps(t, config.Fleet{})
+	src := filepath.Join(dir, "a.txt")
+	dst := filepath.Join(dir, "b.txt")
+	if err := os.WriteFile(src, []byte("line1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(dir, "blocker", "c.txt")
+	patch := "*** Begin Patch\n*** Update File: " + src + "\n*** Move to: " + dst +
+		"\n@@\n-line1\n+line2\n*** Add File: " + bad + "\n+x\n*** End Patch"
+	out, isErr := call(t, &applyPatchTool{d: d}, map[string]any{"target": "web1", "patch": patch})
+	if !isErr {
+		t.Fatalf("第二个文件应失败: %s", out)
+	}
+	writtenPart, _, _ := strings.Cut(out, "未写入")
+	if !strings.Contains(writtenPart, dst) {
+		t.Errorf("Move 成功后应记录目标路径 %s: %s", dst, out)
+	}
+	if strings.Contains(writtenPart, src) {
+		t.Errorf("Move 成功后不应记录旧路径 %s: %s", src, out)
+	}
+	if got := readFile(t, dst); got != "line2\n" {
+		t.Errorf("Move 目标内容不对: %q", got)
 	}
 }
 

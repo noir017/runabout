@@ -23,6 +23,7 @@ type Host struct {
 	Name     string
 	Desc     string
 	SSH      string
+	Workdir  string
 	Approval bool
 	Local    bool
 }
@@ -98,7 +99,7 @@ func New(cfg config.Fleet, shellPath string, shellEnv map[string]string) *Fleet 
 	f.hosts = append(f.hosts, local)
 	f.byName[local.Name] = local
 	for _, h := range cfg.Hosts {
-		host := Host{Name: h.Name, Desc: h.Desc, SSH: h.SSH, Approval: h.Approval}
+		host := Host{Name: h.Name, Desc: h.Desc, SSH: h.SSH, Workdir: h.Workdir, Approval: h.Approval}
 		if host.SSH == "" {
 			host.SSH = host.Name
 		}

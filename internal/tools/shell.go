@@ -33,7 +33,8 @@ func (t *shellTool) Definition() mcp.ToolDef {
 	targetDoc := ""
 	if t.d.fleetEnabled() {
 		targetDoc = "\ntarget 决定在哪台机器上执行，默认 local（runabout 所在容器）。" +
-			"\n本机用 bash；远端由目标机器的登录 shell 执行，命令要保持 POSIX sh 兼容。"
+			"\n本机用 bash；远端由目标机器的登录 shell 执行，命令要保持 POSIX sh 兼容。" +
+			"\n远端默认工作目录是机器配置的 workdir，没配就是登录用户的家目录。"
 	}
 	return mcp.ToolDef{
 		Name:  "shell",
@@ -122,29 +123,29 @@ func (t *shellTool) gate(cc *mcp.CallContext, target targetInfo, command, workdi
 	if token != "" {
 		// 带了令牌：无论本次判定如何，都先校验令牌与命令、目标机器是否对得上。
 		if err := t.d.Confirm.Redeem(token, fp, cc.Principal.Subject); err != nil {
-			t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell", target.name, "confirm_rejected",
+			t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell", auditTarget(target), "confirm_rejected",
 				firstRuleID(verdict), command, workdir, err.Error())
 			return mcp.ToolError("二次确认失败：%s", err.Error())
 		}
 		if verdict.Action == policy.ActionDeny {
-			t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell", target.name, "denied",
+			t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell", auditTarget(target), "denied",
 				firstRuleID(verdict), command, workdir, "deny 级规则不接受确认")
 			return mcp.ToolError("该命令属于禁止执行的类别，确认令牌也无法放行。%s", verdict.Explain())
 		}
-		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell", target.name, "confirmed",
+		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell", auditTarget(target), "confirmed",
 			firstRuleID(verdict), command, workdir, "已通过二次确认")
 		return nil
 	}
 
 	switch verdict.Action {
 	case policy.ActionDeny:
-		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell", target.name, "denied",
+		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell", auditTarget(target), "denied",
 			firstRuleID(verdict), command, workdir, "")
 		return mcp.ToolError("%s\n\n这类命令不接受二次确认。如果确实需要，请人工登录服务器执行，"+
 			"或在服务端配置 policy.downgrade_to_confirm 后重启服务。", verdict.Explain())
 	case policy.ActionConfirm:
 		tok, ttl := t.d.Confirm.Issue(fp, cc.Principal.Subject, firstRuleID(verdict))
-		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell", target.name, "confirm_required",
+		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell", auditTarget(target), "confirm_required",
 			firstRuleID(verdict), command, workdir, "")
 		return mcp.ToolError("%s\n\n命令尚未执行。如果确认要继续，请用【完全相同的 command、workdir 和 target】"+
 			"再调用一次 shell，并带上：\n  confirm_token = %s\n（有效期 %s，仅可使用一次）\n\n"+
@@ -162,11 +163,21 @@ func firstRuleID(v policy.Verdict) string {
 }
 
 func (t *shellTool) resolveWorkdir(target targetInfo, dir string) (string, error) {
+	if target.remote {
+		if strings.TrimSpace(dir) == "" {
+			if target.host.Workdir == "" || target.host.Workdir == "~" {
+				return "", nil // 不 cd，交给远端登录 shell 的家目录
+			}
+			return target.host.Workdir, nil
+		}
+		base := target.host.Workdir
+		if base == "" {
+			base = "~"
+		}
+		return remoteJoin(base, dir), nil
+	}
 	if strings.TrimSpace(dir) == "" {
 		dir = t.d.Cfg.Tools.Shell.DefaultWorkdir
-	}
-	if target.remote {
-		return remoteJoin(t.d.Cfg.Tools.Shell.DefaultWorkdir, dir), nil
 	}
 	abs, err := t.d.Paths.Resolve(dir)
 	if err != nil {
@@ -199,9 +210,13 @@ func (t *shellTool) runForeground(cc *mcp.CallContext, a shellArgs, target targe
 	}
 
 	var sb strings.Builder
-	sb.WriteString(resultHeader(target.name, res.ExitCode, res.Duration.Round(time.Millisecond).String(), workdir))
-	if res.ExitCode != 0 {
-		fmt.Fprintf(&sb, "\n⚠️ 命令以非零状态结束（exit_code: %d）", res.ExitCode)
+	if target.labeled {
+		sb.WriteString(resultHeader(target.name, res.ExitCode, res.Duration.Round(time.Millisecond).String(), workdir))
+		if res.ExitCode != 0 {
+			fmt.Fprintf(&sb, "\n⚠️ 命令以非零状态结束（exit_code: %d）", res.ExitCode)
+		}
+	} else {
+		fmt.Fprintf(&sb, "exit_code: %d\n工作目录: %s\n耗时: %s", res.ExitCode, workdir, res.Duration.Round(time.Millisecond))
 	}
 	if res.TimedOut {
 		fmt.Fprintf(&sb, "\n⚠️ 命令超时（%s）已被终止；下次可调大 timeout_ms 或改用 run_in_background=true", timeout)
@@ -216,17 +231,20 @@ func (t *shellTool) runForeground(cc *mcp.CallContext, a shellArgs, target targe
 		sb.WriteString(section("stderr", res.Stderr))
 	}
 
-	return (&mcp.CallToolResult{
-		Content: []mcp.Content{mcp.TextContent(sb.String())},
-		IsError: res.ExitCode != 0 || res.TimedOut,
-	}).WithStructured(map[string]any{
-		"target":      target.name,
+	meta := map[string]any{
 		"exit_code":   res.ExitCode,
 		"duration_ms": res.Duration.Milliseconds(),
 		"timed_out":   res.TimedOut,
 		"workdir":     workdir,
 		"truncated":   res.Truncated,
-	}), nil
+	}
+	if target.labeled {
+		meta["target"] = target.name
+	}
+	return (&mcp.CallToolResult{
+		Content: []mcp.Content{mcp.TextContent(sb.String())},
+		IsError: res.ExitCode != 0 || res.TimedOut,
+	}).WithStructured(meta), nil
 }
 
 func (t *shellTool) runBackground(cc *mcp.CallContext, a shellArgs, target targetInfo, workdir string) (*mcp.CallToolResult, error) {
@@ -262,10 +280,19 @@ func (t *shellTool) runBackground(cc *mcp.CallContext, a shellArgs, target targe
 		t.d.Log.Info("后台任务结束", "id", p.ID, "target", p.Target, "exit", code, "dur", time.Since(p.Started))
 	}()
 
-	text := fmt.Sprintf("已在 [%s] 后台启动，进程 id: %s\nPID: %d\n工作目录: %s\n命令: %s\n\n"+
-		"用 shell_output 查看输出（支持只看新增部分），用 shell_kill 结束它。",
-		target.name, p.ID, proc.Pid(), workdir, truncate(a.Command, 400))
-	return mcp.Text(text).WithStructured(map[string]any{
-		"target": target.name, "process_id": p.ID, "pid": proc.Pid(), "workdir": workdir,
-	}), nil
+	var text string
+	if target.labeled {
+		text = fmt.Sprintf("已在 [%s] 后台启动，进程 id: %s\nPID: %d\n工作目录: %s\n命令: %s\n\n"+
+			"用 shell_output 查看输出（支持只看新增部分），用 shell_kill 结束它。",
+			target.name, p.ID, proc.Pid(), workdir, truncate(a.Command, 400))
+	} else {
+		text = fmt.Sprintf("已在后台启动，进程 id: %s\nPID: %d\n工作目录: %s\n命令: %s\n\n"+
+			"用 shell_output 查看输出（支持只看新增部分），用 shell_kill 结束它。",
+			p.ID, proc.Pid(), workdir, truncate(a.Command, 400))
+	}
+	meta := map[string]any{"process_id": p.ID, "pid": proc.Pid(), "workdir": workdir}
+	if target.labeled {
+		meta["target"] = target.name
+	}
+	return mcp.Text(text).WithStructured(meta), nil
 }

@@ -94,19 +94,47 @@ func (d *Deps) fsFor(t targetInfo) (fleet.FS, *policy.PathGuard) {
 	return &fleet.RemoteFS{Runner: d.fleetOrLocal(), Target: t.name, MaxBytes: limit}, d.Paths
 }
 
-// remoteJoin 把相对路径接到默认工作目录下；~ 开头的路径原样保留，交给远端 shell 展开。
+// remoteJoin 把相对路径接到 base 下。~ 开头的路径把 ~ 后面的部分锚定到根，
+// 避免 ~/.. 一路穿越到黑名单之外；~ 本身保留给远端 shell 展开。
 func remoteJoin(base, p string) string {
 	p = strings.TrimSpace(p)
 	if p == "" {
 		return ""
 	}
-	if p == "~" || strings.HasPrefix(p, "~/") || path.IsAbs(p) {
+	switch {
+	case p == "~":
+		return "~"
+	case strings.HasPrefix(p, "~/"):
+		return anchorHome(p[1:])
+	case path.IsAbs(p):
 		return path.Clean(p)
 	}
+	base = strings.TrimSpace(base)
 	if base == "" {
-		base = "/"
+		base = "~"
+	}
+	if base == "~" || strings.HasPrefix(base, "~/") {
+		return anchorHome(strings.TrimPrefix(base, "~") + "/" + p)
 	}
 	return path.Join(base, p)
+}
+
+// anchorHome 把 rest 锚定在 ~ 下再 Clean：~/../../etc/shadow 变成 ~/etc/shadow。
+func anchorHome(rest string) string {
+	cleaned := path.Clean("/" + rest)
+	if cleaned == "/" {
+		return "~"
+	}
+	return "~" + cleaned
+}
+
+func hasDotDot(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // targetError 给连接失败补上下一步该做什么；其余错误原样返回。
@@ -141,6 +169,22 @@ func label(t targetInfo) string {
 	return "[" + t.name + "] "
 }
 
+// auditTarget 在单机模式下不写 target，保持与 main 的审计格式一致。
+func auditTarget(t targetInfo) string {
+	if !t.labeled {
+		return ""
+	}
+	return t.name
+}
+
+// remoteBase 是远端相对路径的基准：机器配置的 workdir，没配就是家目录。
+func (d *Deps) remoteBase(t targetInfo) string {
+	if t.host.Workdir != "" {
+		return t.host.Workdir
+	}
+	return "~"
+}
+
 // resolveReadPath / resolveWritePath 统一本机与远端的路径解析：
 // 本机照旧解析软链接，远端只做字面清理与黑名单匹配。
 func resolveReadPath(d *Deps, t targetInfo, guard *policy.PathGuard, p string) (string, error) {
@@ -148,7 +192,7 @@ func resolveReadPath(d *Deps, t targetInfo, guard *policy.PathGuard, p string) (
 		return "", fmt.Errorf("路径不能为空")
 	}
 	if t.remote {
-		return guard.CheckReadLiteral(remoteJoin(d.Cfg.Tools.Shell.DefaultWorkdir, p))
+		return resolveRemotePath(d, t, guard, p, false)
 	}
 	return guard.CheckRead(p)
 }
@@ -158,7 +202,33 @@ func resolveWritePath(d *Deps, t targetInfo, guard *policy.PathGuard, p string) 
 		return "", fmt.Errorf("路径不能为空")
 	}
 	if t.remote {
-		return guard.CheckWriteLiteral(remoteJoin(d.Cfg.Tools.Shell.DefaultWorkdir, p))
+		return resolveRemotePath(d, t, guard, p, true)
 	}
 	return guard.CheckWrite(p)
+}
+
+func resolveRemotePath(d *Deps, t targetInfo, guard *policy.PathGuard, p string, write bool) (string, error) {
+	joined := remoteJoin(d.remoteBase(t), p)
+	var resolved string
+	var err error
+	if write {
+		resolved, err = guard.CheckWriteLiteral(joined)
+	} else {
+		resolved, err = guard.CheckReadLiteral(joined)
+	}
+	if err != nil {
+		return "", err
+	}
+	// 原始路径带 .. 时，Clean 之后再匹配一次，防止折叠后绕过黑名单。
+	if hasDotDot(p) {
+		if write {
+			_, err = guard.CheckWriteLiteral(path.Clean(resolved))
+		} else {
+			_, err = guard.CheckReadLiteral(path.Clean(resolved))
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return resolved, nil
 }
