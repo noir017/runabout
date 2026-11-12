@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/noir017/runabout/internal/fleet"
 	"github.com/noir017/runabout/internal/globmatch"
@@ -344,12 +345,14 @@ func matchGlobFilter(pattern, rel, name string) bool {
 }
 
 func (t *searchTool) emptyResult(target targetInfo, a searchArgs, root, engine string) *mcp.CallToolResult {
+	meta := map[string]any{"matches": []any{}, "count": 0, "engine": engine}
+	if target.labeled {
+		meta["target"] = target.name
+	}
 	return mcp.Textf("%s在 %s 下没有匹配 %q 的内容（%s）。\n\n"+
 		"若结果意外为空，可以试试：literal=true（pattern 含正则符号时）、"+
 		"case_insensitive=true、hidden=true（目标在 .gitignore 里或是隐藏文件）、放宽 glob。",
-		label(target), root, a.Pattern, engine).WithStructured(map[string]any{
-		"target": target.name, "matches": []any{}, "count": 0, "engine": engine,
-	})
+		label(target), root, a.Pattern, engine).WithStructured(meta)
 }
 
 func (t *searchTool) formatMatches(target targetInfo, a searchArgs, root string, lines []string, max int, engine string) *mcp.CallToolResult {
@@ -372,19 +375,33 @@ func (t *searchTool) formatMatches(target targetInfo, a searchArgs, root string,
 	sb.WriteString("\n\n")
 	sb.WriteString(strings.Join(lines, "\n"))
 
-	return mcp.Text(sb.String()).WithStructured(map[string]any{
-		"target": target.name, "matches": lines, "count": len(lines),
+	meta := map[string]any{
+		"matches": lines, "count": len(lines),
 		"truncated": truncated, "root": root, "engine": engine,
-	})
+	}
+	if target.labeled {
+		meta["target"] = target.name
+	}
+	return mcp.Text(sb.String()).WithStructured(meta)
 }
 
 func (t *searchTool) searchRemote(ctx context.Context, target targetInfo, a searchArgs, root string, max int) (*mcp.CallToolResult, error) {
+	timeout := t.d.Cfg.Tools.Search.Timeout
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	script := t.remoteSearchScript(a, root, max)
 	res, err := t.d.fleetOrLocal().Run(ctx, fleet.Spec{
 		Target: target.name, Command: script, MaxOutputBytes: 4 << 20,
 	})
 	if err != nil {
 		return mcp.ToolError("%s", targetError(target.name, err)), nil
+	}
+	if res.TimedOut {
+		return mcp.ToolError("%s搜索超时（%s），请缩小 path 或收窄条件", label(target), timeout), nil
 	}
 	lines := splitNonEmpty(res.Stdout)
 	engine := "grep -rnE（远端回退）"
@@ -442,11 +459,13 @@ func (t *searchTool) remoteSearchScript(a searchArgs, root string, max int) stri
 	if a.FilesOnly {
 		rgArgs = append(rgArgs, "--files-with-matches")
 	}
-	rgArgs = append(rgArgs, "--max-count", strconv.Itoa(max+1), "--", a.Pattern, root)
+	rgArgs = append(rgArgs, "--max-count", strconv.Itoa(max+1), "--", a.Pattern)
 	for _, arg := range rgArgs {
 		b.WriteString(" ")
 		b.WriteString(fleet.Quote(arg))
 	}
+	b.WriteString(" ")
+	b.WriteString(fleet.QuotePath(root))
 
 	b.WriteString("\nelse\nprintf '__RB_ENGINE__=grep\\n'\ngrep")
 	grepArgs := []string{"-r"}
@@ -466,11 +485,13 @@ func (t *searchTool) remoteSearchScript(a searchArgs, root string, max int) stri
 	if a.ContextLines > 0 {
 		grepArgs = append(grepArgs, "-C", strconv.Itoa(a.ContextLines))
 	}
-	grepArgs = append(grepArgs, "-e", a.Pattern, root)
+	grepArgs = append(grepArgs, "-e", a.Pattern)
 	for _, arg := range grepArgs {
 		b.WriteString(" ")
 		b.WriteString(fleet.Quote(arg))
 	}
+	b.WriteString(" ")
+	b.WriteString(fleet.QuotePath(root))
 	b.WriteString("\nfi")
 	return b.String()
 }

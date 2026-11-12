@@ -176,11 +176,13 @@ func (t *globTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 	}
 
 	if len(hits) == 0 {
+		meta := map[string]any{"files": []any{}, "count": 0}
+		if target.labeled {
+			meta["target"] = target.name
+		}
 		return mcp.Textf("%s在 %s 下没有匹配 %q 的路径。\n\n"+
 			"提示：跨层级要用 **（如 **/*.go）；目标可能是隐藏文件或在 .gitignore 里，可试 hidden=true。",
-			label(target), abs, a.Pattern).WithStructured(map[string]any{
-			"target": target.name, "files": []any{}, "count": 0,
-		}), nil
+			label(target), abs, a.Pattern).WithStructured(meta), nil
 	}
 
 	var sb strings.Builder
@@ -202,10 +204,14 @@ func (t *globTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 			"mtime": h.Mtime.Format(time.RFC3339),
 		})
 	}
-	return mcp.Text(sb.String()).WithStructured(map[string]any{
-		"target": target.name, "files": items, "count": len(items),
+	meta := map[string]any{
+		"files": items, "count": len(items),
 		"truncated": truncated, "root": abs,
-	}), nil
+	}
+	if target.labeled {
+		meta["target"] = target.name
+	}
+	return mcp.Text(sb.String()).WithStructured(meta), nil
 }
 
 // globMatchLoose 在标准匹配之外补两条便利规则：模式不含 / 时按任意层级匹配
@@ -221,6 +227,13 @@ func globMatchLoose(pattern, rel, name string) bool {
 }
 
 func (t *globTool) globRemote(ctx context.Context, target targetInfo, a globArgs, root string, max int) (*mcp.CallToolResult, error) {
+	timeout := t.d.Cfg.Tools.Search.Timeout
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	script := t.remoteGlobScript(a, root, max)
 	res, err := t.d.fleetOrLocal().Run(ctx, fleet.Spec{
 		Target: target.name, Command: script, MaxOutputBytes: 4 << 20,
@@ -228,17 +241,35 @@ func (t *globTool) globRemote(ctx context.Context, target targetInfo, a globArgs
 	if err != nil {
 		return mcp.ToolError("%s", targetError(target.name, err)), nil
 	}
+	if res.TimedOut {
+		return mcp.ToolError("%s查找超时（%s），请缩小 path 或收窄条件", label(target), timeout), nil
+	}
+
 	engine := "find（远端回退）"
 	filter := true
-	if strings.Contains(res.Stderr, "engine=rg") {
-		engine, filter = "rg --files（远端）", false
+	expandedRoot := ""
+	listExit := 0
+	for _, line := range strings.Split(res.Stderr, "\n") {
+		switch {
+		case strings.HasPrefix(line, "root="):
+			expandedRoot = strings.TrimPrefix(line, "root=")
+		case line == "engine=rg":
+			engine, filter = "rg --files（远端）", false
+		case strings.HasPrefix(line, "list-exit="):
+			listExit, _ = strconv.Atoi(strings.TrimPrefix(line, "list-exit="))
+		}
+	}
+	if strings.Contains(res.Stderr, "root-error") {
+		return mcp.ToolError("%s目录不可用：%s", label(target), root), nil
 	}
 	if res.ExitCode != 0 {
-		msg := firstLine(res.Stderr)
-		if msg == "" {
-			msg = "exit=" + strconv.Itoa(res.ExitCode)
-		}
-		return mcp.ToolError("%s查找失败：%s", label(target), msg), nil
+		return mcp.ToolError("%s查找失败：%s", label(target), remoteStderrDetail(res.Stderr)), nil
+	}
+	if listExit != 0 && listExit != 141 {
+		return mcp.ToolError("%s查找失败（exit=%d）：%s", label(target), listExit, remoteStderrDetail(res.Stderr)), nil
+	}
+	if expandedRoot == "" {
+		expandedRoot = root
 	}
 
 	ignore := map[string]bool{}
@@ -266,7 +297,7 @@ func (t *globTool) globRemote(ctx context.Context, target targetInfo, a globArgs
 		}
 		p := parts[3]
 		if filter {
-			rel, relErr := filepath.Rel(root, p)
+			rel, relErr := filepath.Rel(expandedRoot, p)
 			if relErr != nil {
 				continue
 			}
@@ -304,15 +335,17 @@ func (t *globTool) globRemote(ctx context.Context, target targetInfo, a globArgs
 	}
 
 	if len(hits) == 0 {
+		meta := map[string]any{"files": []any{}, "count": 0, "engine": engine}
+		if target.labeled {
+			meta["target"] = target.name
+		}
 		return mcp.Textf("%s在 %s 下没有匹配 %q 的路径（%s）。\n\n"+
 			"提示：跨层级要用 **（如 **/*.go）；目标可能是隐藏文件，可试 hidden=true。",
-			label(target), root, a.Pattern, engine).WithStructured(map[string]any{
-			"target": target.name, "files": []any{}, "count": 0, "engine": engine,
-		}), nil
+			label(target), expandedRoot, a.Pattern, engine).WithStructured(meta), nil
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s在 %s 下匹配 %q 的 %d 个路径（%s）", label(target), root, a.Pattern, len(hits), engine)
+	fmt.Fprintf(&sb, "%s在 %s 下匹配 %q 的 %d 个路径（%s）", label(target), expandedRoot, a.Pattern, len(hits), engine)
 	if strings.Contains(engine, "回退") {
 		sb.WriteString("；回退模式下部分参数可能不生效")
 	}
@@ -331,19 +364,30 @@ func (t *globTool) globRemote(ctx context.Context, target targetInfo, a globArgs
 			"path": h.Path, "size": h.Size, "is_dir": h.IsDir, "mtime": h.Mtime.Format(time.RFC3339),
 		})
 	}
-	return mcp.Text(sb.String()).WithStructured(map[string]any{
-		"target": target.name, "files": items, "count": len(items),
-		"truncated": truncated, "root": root, "engine": engine,
-	}), nil
+	meta := map[string]any{
+		"files": items, "count": len(items),
+		"truncated": truncated, "root": expandedRoot, "engine": engine,
+	}
+	if target.labeled {
+		meta["target"] = target.name
+	}
+	return mcp.Text(sb.String()).WithStructured(meta), nil
 }
 
-// remoteGlobScript 有 rg 用 rg --files，否则用 find；引擎标记写 stderr，
-// 结果统一交给 while 循环用 stat 补上大小和 mtime。
+// remoteGlobScript 有 rg 用 rg --files，否则用 find。根目录先 cd 解析成绝对路径，
+// 这样 ~ 能展开、相对路径也能按展开后的根计算；list-exit 标记用来区分真正的
+// 错误和 head 提前退出造成的 SIGPIPE(141)。
 func (t *globTool) remoteGlobScript(a globArgs, root string, max int) string {
 	var b strings.Builder
+	fmt.Fprintf(&b, "root=$(cd %s 2>/dev/null && pwd) || { printf 'root-error\\n' >&2; exit 1; }\n", fleet.QuotePath(root))
+	b.WriteString("printf 'root=%s\\n' \"$root\" >&2\n")
+
 	absolute := strings.HasPrefix(a.Pattern, "/")
-	if !a.IncludeDirs && !absolute {
-		b.WriteString("if command -v rg >/dev/null 2>&1; then\nprintf 'engine=rg\\n' >&2\nrg")
+	useRG := !a.IncludeDirs && !absolute
+	if useRG {
+		b.WriteString("if command -v rg >/dev/null 2>&1; then\n")
+		b.WriteString("printf 'engine=rg\\n' >&2\n")
+		b.WriteString("{ rg")
 		args := []string{"--files"}
 		if a.Hidden {
 			args = append(args, "--hidden", "--no-ignore")
@@ -354,15 +398,16 @@ func (t *globTool) remoteGlobScript(a globArgs, root string, max int) string {
 				args = append(args, "--glob", "!"+d+"/**", "--glob", "!**/"+d+"/**")
 			}
 		}
-		args = append(args, "--", root)
 		for _, arg := range args {
 			b.WriteString(" ")
 			b.WriteString(fleet.Quote(arg))
 		}
-		b.WriteString("\nelse\n")
+		b.WriteString(" -- \"$root\"; code=$?; printf 'list-exit=%d\\n' \"$code\" >&2; }\n")
+		b.WriteString("else\n")
 	}
-	b.WriteString("printf 'engine=find\\n' >&2\nfind ")
-	findArgs := []string{root}
+	b.WriteString("printf 'engine=find\\n' >&2\n")
+	b.WriteString("{ find \"$root\"")
+	findArgs := []string{}
 	if a.IncludeDirs {
 		findArgs = append(findArgs, "(", "-type", "f", "-o", "-type", "d", ")")
 	} else {
@@ -372,15 +417,12 @@ func (t *globTool) remoteGlobScript(a globArgs, root string, max int) string {
 	if base != "" && base != "." && base != "/" && base != "**" && !strings.ContainsAny(base, "{}") {
 		findArgs = append(findArgs, "-name", base)
 	}
-	for i, arg := range findArgs {
-		if i == 0 {
-			b.WriteString(fleet.Quote(arg))
-			continue
-		}
+	for _, arg := range findArgs {
 		b.WriteString(" ")
 		b.WriteString(fleet.Quote(arg))
 	}
-	if !a.IncludeDirs && !absolute {
+	b.WriteString("; code=$?; printf 'list-exit=%d\\n' \"$code\" >&2; }")
+	if useRG {
 		b.WriteString("\nfi")
 	}
 	limit := max*4 + 100
@@ -389,6 +431,18 @@ func (t *globTool) remoteGlobScript(a globArgs, root string, max int) string {
 	}
 	fmt.Fprintf(&b, " | head -n %d | while IFS= read -r f; do stat -c '%%s|%%Y|%%f|%%n' -- \"$f\" 2>/dev/null; done", limit)
 	return b.String()
+}
+
+func remoteStderrDetail(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "engine=") ||
+			strings.HasPrefix(line, "root=") || strings.HasPrefix(line, "list-exit=") {
+			continue
+		}
+		return line
+	}
+	return "未知错误"
 }
 
 func hiddenOrIgnored(rel string, hidden bool, ignore map[string]bool) bool {
