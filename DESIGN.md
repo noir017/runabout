@@ -165,18 +165,30 @@ OpenAI 兼容的 `/chat/completions` 接口：启用后 `read` 除了 image 块�
 有的客户端对没有 readOnlyHint 的工具一律当写操作处理，查个日志也要用户点一次。`query` 标了
 readOnlyHint / idempotentHint、destructiveHint=false，让模型有一个不弹确认的查询入口。
 
-它不执行任意命令。`internal/policy/readonly.go` 复用 shell 的 AST 解析，只放行白名单里的命令：
+它不执行任意命令。`internal/policy/readonly.go` 按 AST 节点类型做允许列表，只放行简单命令、
+管道（|、|&）、&&、||、;。赋值语句、声明语句（export/declare/readonly/local/typeset）、函数定义、
+子 shell、块、算术、test 子句、if/for/while/case、后台 & 一律拒绝。
 
-- 基础命令：ls、cat、head、tail、grep、rg、find、df、du、free、ps、uptime、ss、ip、journalctl、systemctl、docker 等。
-- 选项也走允许列表：长选项按完整名字精确匹配（`--out=` 不会被当成 `--output`），短选项按字母判定；
-  find 的谓词单独按允许列表判定。不在列表里的选项一律拒绝。
-- 子命令级判定：`systemctl` 只认 status/is-active/list-units 一类；`docker` 按"对象 + 动词"白名单
-  （ps/logs/inspect/images 等）；`ip` 只认 show/list/get；`find` 拒绝 -exec/-delete；`journalctl` 拒绝
-  --vacuum/--rotate；`sort` 拒绝 -o；`rg` 拒绝 --pre。
-- 命令名带 `/`（如 `/bin/ls`）、带变量赋值前缀（`PATH=... ls`、`LD_PRELOAD=... ls`、`env PATH=... ls`）
-  一律拒绝；uniq 已移出白名单，因为它的第二个位置参数就是输出文件。
-- 管道、`&&`、`;` 都允许，但每一段都要过白名单。
+完整命令清单：ls、cat、head、tail、grep、rg、find、df、du、free、ps、uptime、ss、ip、journalctl、
+systemctl、docker、stat、file、wc、sort、uname、hostname、id、whoami、pwd、which、echo、printf、
+printenv、nproc、date、lsof、netstat、lsblk、blkid、lscpu、who、last、md5sum、sha256sum、base64、
+cut、tr、dig、realpath、readlink、dirname、basename、logread。
+
+- 选项走允许列表：长选项按完整名字精确匹配（`--out=` 不会被当成 `--output`），短选项按字母判定；
+  带值的选项会跳过下一个 token，所以 `journalctl --since '-1 hour'`、`date -d '-1 day'` 可用。
+  find 的谓词单独按允许列表判定。
+- 命令名前缀只允许不带选项的 sudo（`sudo ls`）；env、timeout、nice、command、xargs、nohup 等包装
+  一律拒绝。命令名带 `/`、带变量赋值前缀（`PATH=... ls`、`LD_PRELOAD=... ls`）也一律拒绝。
+- 子命令级判定：`systemctl` 只允许 status、is-active、is-enabled、is-failed、is-system-running、
+  get-default、show-environment、list-units、list-unit-files、list-timers、list-sockets、list-jobs、
+  list-machines、show、cat、help；`docker` 顶层只允许 ps、images、logs、inspect、stats、version、
+  info、top、port、diff、events、history、search，container/image/network/volume/system/node/service/
+  context/compose 下只允许对应的 ls/ps/inspect/logs/history/df/info/events/show/config/top/images/version；
+  `ip` 的全局选项单独走允许列表（-b/-batch/--batch/-force 拒绝），对象后只允许 show/list/ls/get 或
+  不带动词；`find` 拒绝 -exec/-delete；`journalctl` 的 --vacuum/--rotate 等写选项不在白名单；
+  `sort` 拒绝 -o；`rg` 拒绝 --pre。
 - 写重定向（>、>>、&>）、命令替换、进程替换、含变量且无法展开的参数、解析不出来的命令名，一律拒绝。
+- uniq 已移出白名单，因为它的第二个位置参数就是输出文件。
 - 判定失败时返回具体原因，并提示改用 shell。
 
 在只读白名单之外，还会再跑一遍现有的 shell 风险规则：shell 里需要二次确认的命令（例如读取私钥）
