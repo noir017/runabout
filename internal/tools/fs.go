@@ -69,7 +69,7 @@ func (t *readTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 	fsys, guard := t.d.fsFor(target)
 	abs, err := resolveReadPath(t.d, target, guard, a.Path)
 	if err != nil {
-		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "read", target.name, "denied", "path-deny", a.Path, "", err.Error())
+		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "read", auditTarget(target), "denied", "path-deny", a.Path, "", err.Error())
 		return mcp.ToolError("%s", err.Error()), nil
 	}
 	st, err := fsys.Stat(cc.Ctx, abs)
@@ -117,7 +117,9 @@ func (t *readTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 	text, meta := formatLines(string(data), offset, limit, fs.MaxLineChars, a.Raw)
 	meta["path"] = abs
 	meta["size_bytes"] = st.Size
-	meta["target"] = target.name
+	if target.labeled {
+		meta["target"] = target.name
+	}
 
 	var header strings.Builder
 	fmt.Fprintf(&header, "%s%s（%s，共 %d 行）", label(target), abs, humanBytes(st.Size), meta["total_lines"])
@@ -276,7 +278,7 @@ func (t *writeTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallToo
 	}
 	abs, err := t.d.Paths.CheckWrite(a.Path)
 	if err != nil {
-		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "write", "local", "denied", "path-deny", a.Path, "", err.Error())
+		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "write", "", "denied", "path-deny", a.Path, "", err.Error())
 		return mcp.ToolError("%s", err.Error()), nil
 	}
 	if max := t.d.Cfg.Tools.FS.MaxWriteBytes; max > 0 && len(a.Content) > max {

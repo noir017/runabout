@@ -565,8 +565,8 @@ func TestSensitivePathBlocked(t *testing.T) {
 	out, isErr = h.callTool("apply_patch", map[string]any{
 		"patch": "*** Begin Patch\n*** Add File: /proc/sysrq-trigger\n+c\n*** End Patch",
 	})
-	if !isErr {
-		t.Errorf("写 /proc 应被拒绝:\n%s", out)
+	if !isErr || !strings.Contains(out, "敏感路径") {
+		t.Errorf("写 /proc 应被策略拒绝:\n%s", out)
 	}
 }
 
@@ -732,7 +732,7 @@ func TestFleetConfirmTokenCrossTarget(t *testing.T) {
 
 // TestReadOnlyAnnotationsOverMCP 钉住只读工具的 annotations。
 func TestReadOnlyAnnotationsOverMCP(t *testing.T) {
-	h := newHarness(t)
+	h := fleetHarness(t)
 	h.authorize()
 	h.rpc("initialize", map[string]any{"protocolVersion": "2025-06-18",
 		"clientInfo": map[string]any{"name": "t", "version": "1"}})

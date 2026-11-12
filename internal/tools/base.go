@@ -35,17 +35,19 @@ type Deps struct {
 // All 按配置构造全部启用的工具。
 func All(d *Deps) []mcp.Handler {
 	candidates := []mcp.Handler{
-		// 默认只暴露 8 个核心 Agent 工具。
+		// 默认只暴露 7 个核心 Agent 工具；配了 fleet.hosts 再加 servers。
 		// write / list_dir / shell_list 保留实现，但不进入 MCP tool surface，
 		// 避免重复能力增加模型的选择负担。
 		&shellTool{d: d},
 		&shellOutputTool{d: d},
 		&shellKillTool{d: d},
-		&serversTool{d: d},
 		&readTool{d: d},
 		&applyPatchTool{d: d},
 		&searchTool{d: d},
 		&globTool{d: d},
+	}
+	if d.fleetEnabled() {
+		candidates = append(candidates, &serversTool{d: d})
 	}
 	out := make([]mcp.Handler, 0, len(candidates))
 	for _, h := range candidates {

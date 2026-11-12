@@ -67,10 +67,6 @@ func (t *serversTool) Definition() mcp.ToolDef {
 带 target：返回这一台的详细快照（内存、磁盘、容器、失败的 systemd 单元）。
 
 用户问服务器怎么样、哪台有问题，或者你不确定该去哪台时，先调它。`
-	if !t.d.fleetEnabled() {
-		desc = `查看这台机器的状态。只读，可以随便调。
-返回负载、内存和根分区占用。`
-	}
 	return mcp.ToolDef{
 		Name:        "servers",
 		Title:       "查看服务器状态",

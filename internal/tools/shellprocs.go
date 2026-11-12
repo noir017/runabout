@@ -46,12 +46,19 @@ func (t *shellListTool) Call(cc *mcp.CallContext, _ json.RawMessage) (*mcp.CallT
 		if label != "" {
 			label = " [" + label + "]"
 		}
-		fmt.Fprintf(&sb, "\n· %s%s  [%s]  %s  %s  已捕获 %d 字节\n  cwd=%s\n  cmd=%s",
-			p.ID, label, p.Target, state, elapsed.Round(time.Second), p.out.Total(), p.Workdir, truncate(p.Command, 200))
+		targetPrefix := ""
+		if t.d.fleetEnabled() {
+			targetPrefix = "[" + p.Target + "] "
+		}
+		fmt.Fprintf(&sb, "\n· %s%s  %s%s  %s  已捕获 %d 字节\n  cwd=%s\n  cmd=%s",
+			p.ID, label, targetPrefix, state, elapsed.Round(time.Second), p.out.Total(), p.Workdir, truncate(p.Command, 200))
 		item := map[string]any{
-			"process_id": p.ID, "target": p.Target, "label": p.Label, "state": state, "running": running,
+			"process_id": p.ID, "label": p.Label, "state": state, "running": running,
 			"command": p.Command, "workdir": p.Workdir,
 			"started_at": p.Started.Format(time.RFC3339), "output_bytes": p.out.Total(),
+		}
+		if t.d.fleetEnabled() {
+			item["target"] = p.Target
 		}
 		if !running {
 			item["exit_code"] = code
@@ -116,11 +123,15 @@ func (t *shellOutputTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.C
 	}
 
 	running, code, runErr, _ := p.Status()
+	targetPrefix := ""
+	if t.d.fleetEnabled() {
+		targetPrefix = "[" + p.Target + "] "
+	}
 	var sb strings.Builder
 	if running {
-		fmt.Fprintf(&sb, "[%s] 进程 %s 仍在运行（已 %s）\n", p.Target, p.ID, time.Since(p.Started).Round(time.Second))
+		fmt.Fprintf(&sb, "%s进程 %s 仍在运行（已 %s）\n", targetPrefix, p.ID, time.Since(p.Started).Round(time.Second))
 	} else {
-		fmt.Fprintf(&sb, "[%s] 进程 %s 已结束，exit_code=%d\n", p.Target, p.ID, code)
+		fmt.Fprintf(&sb, "%s进程 %s 已结束，exit_code=%d\n", targetPrefix, p.ID, code)
 		if runErr != nil {
 			fmt.Fprintf(&sb, "错误: %v\n", runErr)
 		}
@@ -128,10 +139,14 @@ func (t *shellOutputTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.C
 	sb.WriteString("\n")
 	sb.WriteString(section("output", out))
 
-	return mcp.Text(sb.String()).WithStructured(map[string]any{
-		"process_id": p.ID, "target": p.Target, "running": running, "exit_code": code,
+	meta := map[string]any{
+		"process_id": p.ID, "running": running, "exit_code": code,
 		"output": out, "total_bytes": p.out.Total(),
-	}), nil
+	}
+	if t.d.fleetEnabled() {
+		meta["target"] = p.Target
+	}
+	return mcp.Text(sb.String()).WithStructured(meta), nil
 }
 
 func tailLines(s string, n int) string {
@@ -196,7 +211,11 @@ func (t *shellKillTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.Cal
 		return mcp.ToolError("发送信号失败: %v", err), nil
 	}
 	stopped := p.Wait(3 * time.Second)
-	t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell_kill", p.Target, "signal", "",
+	target := ""
+	if t.d.fleetEnabled() {
+		target = p.Target
+	}
+	t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell_kill", target, "signal", "",
 		p.Command, p.Workdir, "SIG"+name)
 
 	msg := fmt.Sprintf("已向进程 %s 发送 SIG%s。", p.ID, name)
