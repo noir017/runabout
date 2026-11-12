@@ -89,6 +89,14 @@ func (g *ShellGuard) CheckReadOnly(command string) error {
 				return fmt.Errorf("命令涉及凭据类路径 %s（命中 %s），只读查询不允许", t, hit)
 			}
 		}
+		for _, r := range c.Redirects {
+			if r.Op != "<" {
+				continue
+			}
+			if hit, ok := g.matchSecret(r.Target); ok {
+				return fmt.Errorf("命令从凭据类路径 %s 读取（命中 %s），只读查询不允许", r.Target, hit)
+			}
+		}
 	}
 	if v := g.Inspect(command); v.Action != ActionAllow {
 		return fmt.Errorf("命令命中安全规则，需要确认或禁止：%s", v.Explain())
@@ -147,7 +155,10 @@ func checkReadOnlyCmd(c *Cmd) error {
 // readOnlyRedirect 只放行读入和文件描述符复制；>、>>、&> 等写重定向一律拒绝。
 func readOnlyRedirect(r Redir) bool {
 	switch r.Op {
-	case "<", "<<", "<<-", "<<<":
+	case "<":
+		// 读入也要能静态确定路径，否则 cat < $FILE 无法证明安全。
+		return !r.Unresolved
+	case "<<", "<<-", "<<<":
 		return true
 	case ">&", "<&":
 		return !r.Unresolved && isDigits(r.Target)

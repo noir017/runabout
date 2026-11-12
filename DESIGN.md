@@ -187,7 +187,8 @@ cut、tr、dig、realpath、readlink、dirname、basename、logread。
   `ip` 的全局选项单独走允许列表（-b/-batch/--batch/-force 拒绝），对象后只允许 show/list/ls/get 或
   不带动词；`find` 拒绝 -exec/-delete；`journalctl` 的 --vacuum/--rotate 等写选项不在白名单；
   `sort` 拒绝 -o；`rg` 拒绝 --pre。
-- 写重定向（>、>>、&>）、命令替换、进程替换、含变量且无法展开的参数、解析不出来的命令名，一律拒绝。
+- 写重定向（>、>>、&>）、无法静态确定的读重定向（`cat < $FILE`）、命令替换、进程替换、含变量且
+  无法展开的参数、解析不出来的命令名，一律拒绝；读重定向的目标也要过凭据路径检查。
 - uniq 已移出白名单，因为它的第二个位置参数就是输出文件。
 - 判定失败时返回具体原因，并提示改用 shell。
 

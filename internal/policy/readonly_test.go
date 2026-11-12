@@ -11,6 +11,9 @@ func TestReadOnlyGuardRejectsSecrets(t *testing.T) {
 	if err := g.CheckReadOnly("grep root /etc/shadow"); err == nil {
 		t.Error("凭据类路径即使不是 cat 也应被拒绝")
 	}
+	if err := g.CheckReadOnly("cat < /etc/shadow"); err == nil {
+		t.Error("从凭据类路径读入也应被拒绝")
+	}
 	if err := g.CheckReadOnly("systemctl status nginx"); err != nil {
 		t.Errorf("普通只读命令不应受影响: %v", err)
 	}
@@ -115,6 +118,7 @@ func TestReadOnlyRejects(t *testing.T) {
 		"echo hi | tee /tmp/out",
 		"cat $(rm -rf /tmp/x)",
 		"cat $FILE",
+		"cat < $FILE",
 		"cat <(rm -rf /tmp/x)",
 		"find . -delete",
 		"find . -exec rm {} ;",
