@@ -40,6 +40,7 @@ func (t *readTool) Definition() mcp.ToolDef {
 - 单行超过 %d 字符会被截断。
 - raw=true 时不加行号，适合需要原样内容的场景。
 - 图片（png/jpg/gif/webp/bmp）会以图像形式返回；长边超过 %d 像素或处理后超过 %s 时自动缩小并转成 JPEG。%s
+- 服务端启用视觉描述时，图片后还会附一段文字说明。
 - 其他二进制文件会被拒绝，请改用 shell 里的 xxd/file。
 - 少数凭据类文件（私钥、云凭据等）被策略禁止读取，会返回明确错误。`,
 			fs.DefaultLines, fs.MaxLineChars, fs.ImageMaxEdge, humanBytes(int64(fs.MaxImageBytes)), remoteDoc),

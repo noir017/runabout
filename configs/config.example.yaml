@@ -95,6 +95,15 @@ tools:
     # 读图时自动缩放的长边上限（像素）。
     image_max_edge: 2000
 
+    # 可选：读图后追加一段视觉模型生成的文字描述，用于客户端看不到图片时兜底。
+    # base_url 和 model 都填才启用，默认关闭。接口需兼容 OpenAI 的 /chat/completions。
+    vision:
+      base_url: ""
+      model: ""
+      # API key 只从这个环境变量读取；留空表示接口不需要鉴权。
+      api_key_env: ""
+      timeout: 30s
+
   search:
     # 有 rg 就用 rg（快且尊重 .gitignore），没有则回退内置实现。
     use_ripgrep: true

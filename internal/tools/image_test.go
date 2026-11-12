@@ -10,11 +10,15 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/noir017/runabout/internal/config"
 	"github.com/noir017/runabout/internal/mcp"
 )
 
@@ -142,6 +146,77 @@ func TestReadImagePixelBomb(t *testing.T) {
 	out, isErr := call(t, &readTool{d: d}, map[string]any{"path": path})
 	if !isErr || !strings.Contains(out, "像素") {
 		t.Errorf("超大像素数应在解码前被拒绝:\n%s", out)
+	}
+}
+
+func TestReadImageVision(t *testing.T) {
+	d, dir := newTestDeps(t)
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"界面显示：登录失败，密码错误。"}}]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("TEST_VISION_KEY", "secret")
+	d.Cfg.Tools.FS.Vision = config.VisionCfg{
+		BaseURL: srv.URL, Model: "vision-test", APIKeyEnv: "TEST_VISION_KEY", Timeout: time.Second,
+	}
+	path := filepath.Join(dir, "ui.png")
+	writePNG(t, path, 80, 40)
+
+	res := callRaw(t, &readTool{d: d}, map[string]any{"path": path})
+	if res.IsError {
+		t.Fatalf("读图失败: %s", textOf(res))
+	}
+	text := textOf(res)
+	if !strings.Contains(text, "视觉描述") || !strings.Contains(text, "登录失败") {
+		t.Errorf("应附上视觉描述:\n%s", text)
+	}
+	if _, mime := findImage(t, res); mime != "image/png" {
+		t.Errorf("图片本身应照常返回，实际 %s", mime)
+	}
+	if gotAuth != "Bearer secret" {
+		t.Errorf("key 应从环境变量读取并放进 Bearer 头，实际 %q", gotAuth)
+	}
+}
+
+func TestReadImageVisionFailureKeepsImage(t *testing.T) {
+	d, dir := newTestDeps(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"upstream down"}}`))
+	}))
+	defer srv.Close()
+	d.Cfg.Tools.FS.Vision = config.VisionCfg{BaseURL: srv.URL, Model: "m", Timeout: time.Second}
+	path := filepath.Join(dir, "ui.png")
+	writePNG(t, path, 80, 40)
+
+	res := callRaw(t, &readTool{d: d}, map[string]any{"path": path})
+	if res.IsError {
+		t.Fatalf("视觉描述失败不应让读图失败: %s", textOf(res))
+	}
+	if !strings.Contains(textOf(res), "视觉描述失败") || !strings.Contains(textOf(res), "upstream down") {
+		t.Errorf("应注明失败原因:\n%s", textOf(res))
+	}
+	if _, mime := findImage(t, res); mime != "image/png" {
+		t.Errorf("图片本身应照常返回，实际 %s", mime)
+	}
+}
+
+func TestReadImageVisionMissingKey(t *testing.T) {
+	d, dir := newTestDeps(t)
+	d.Cfg.Tools.FS.Vision = config.VisionCfg{
+		BaseURL: "http://127.0.0.1:1", Model: "m", APIKeyEnv: "RB_TEST_NO_SUCH_KEY",
+	}
+	path := filepath.Join(dir, "ui.png")
+	writePNG(t, path, 40, 20)
+
+	res := callRaw(t, &readTool{d: d}, map[string]any{"path": path})
+	if res.IsError {
+		t.Fatalf("缺 key 不应让读图失败: %s", textOf(res))
+	}
+	if !strings.Contains(textOf(res), "RB_TEST_NO_SUCH_KEY") {
+		t.Errorf("应说明缺哪个环境变量:\n%s", textOf(res))
 	}
 }
 

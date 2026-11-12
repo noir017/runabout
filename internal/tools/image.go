@@ -4,7 +4,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 
+	"github.com/noir017/runabout/internal/config"
 	"github.com/noir017/runabout/internal/imaging"
 	"github.com/noir017/runabout/internal/mcp"
 )
@@ -34,6 +37,15 @@ func (t *readTool) readImage(cc *mcp.CallContext, prefix, abs, mime string, data
 	content := []mcp.Content{
 		mcp.TextContent(header),
 		mcp.ImageContent(base64.StdEncoding.EncodeToString(res.Data), res.MIME),
+	}
+	// 视觉描述是兜底：失败只附一句原因，图片本身照常返回。
+	if vc := fs.Vision; strings.TrimSpace(vc.BaseURL) != "" && strings.TrimSpace(vc.Model) != "" {
+		desc, err := describeImage(cc, vc, res.Data, res.MIME)
+		if err != nil {
+			content = append(content, mcp.TextContent("视觉描述失败："+err.Error()))
+		} else {
+			content = append(content, mcp.TextContent("视觉描述：\n"+desc))
+		}
 	}
 	meta := map[string]any{
 		"path": abs, "mime": res.MIME,
@@ -67,4 +79,17 @@ func sniffImageMime(head []byte) (string, bool) {
 		return "image/webp", true
 	}
 	return "", false
+}
+
+// describeImage 只从 api_key_env 指定的环境变量取 key，配置里不落密钥。
+func describeImage(cc *mcp.CallContext, vc config.VisionCfg, data []byte, mime string) (string, error) {
+	key := ""
+	if name := strings.TrimSpace(vc.APIKeyEnv); name != "" {
+		key = os.Getenv(name)
+		if key == "" {
+			return "", fmt.Errorf("环境变量 %s 未设置", name)
+		}
+	}
+	v := &imaging.Vision{BaseURL: vc.BaseURL, Model: vc.Model, APIKey: key, Timeout: vc.Timeout}
+	return v.Describe(cc.Ctx, data, mime)
 }

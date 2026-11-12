@@ -148,6 +148,17 @@ type FSCfg struct {
 	MaxImageSourceBytes int `yaml:"max_image_source_bytes"`
 	// ImageMaxEdge 是读图时自动缩放的长边上限（像素）。
 	ImageMaxEdge int `yaml:"image_max_edge"`
+	// Vision 是读图后的可选视觉描述。BaseURL 与 Model 都非空才启用。
+	Vision VisionCfg `yaml:"vision"`
+}
+
+// VisionCfg 指向一个 OpenAI 兼容的 /chat/completions 接口。
+type VisionCfg struct {
+	BaseURL string `yaml:"base_url"`
+	Model   string `yaml:"model"`
+	// APIKeyEnv 是存放 API key 的环境变量名；留空表示接口不需要鉴权。
+	APIKeyEnv string        `yaml:"api_key_env"`
+	Timeout   time.Duration `yaml:"timeout"`
 }
 
 type SearchCfg struct {
@@ -233,6 +244,7 @@ func Default() *Config {
 				MaxImageBytes:       4 << 20,
 				MaxImageSourceBytes: 32 << 20,
 				ImageMaxEdge:        2000,
+				Vision:              VisionCfg{Timeout: 30 * time.Second},
 			},
 			Search: SearchCfg{
 				UseRipgrep:    true,
@@ -357,6 +369,9 @@ func (c *Config) Normalize() error {
 	}
 	if c.Tools.FS.ImageMaxEdge <= 0 {
 		c.Tools.FS.ImageMaxEdge = 2000
+	}
+	if c.Tools.FS.Vision.Timeout <= 0 {
+		c.Tools.FS.Vision.Timeout = 30 * time.Second
 	}
 	if c.Audit.Enabled && c.Audit.File == "" {
 		c.Audit.File = filepath.Join(c.Server.DataDir, "audit.jsonl")
