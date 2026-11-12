@@ -152,4 +152,24 @@ func TestRemoteFileRelativeDefaultsToHome(t *testing.T) {
 	}
 }
 
+func TestRemoteSearchAndGlobRelativeUseHostWorkdir(t *testing.T) {
+	hostDir := t.TempDir()
+	mustWrite(t, filepath.Join(hostDir, "a.txt"), "needle\n")
+	d, _ := newFleetDeps(t, config.Fleet{Hosts: []config.FleetHost{
+		{Name: "web1", Workdir: hostDir},
+	}})
+	out, isErr := call(t, &searchTool{d: d}, map[string]any{
+		"target": "web1", "pattern": "needle", "path": ".",
+	})
+	if isErr || !strings.Contains(out, "a.txt") {
+		t.Errorf("search 相对路径应按机器 workdir 解析: %s", out)
+	}
+	out, isErr = call(t, &globTool{d: d}, map[string]any{
+		"target": "web1", "pattern": "*.txt", "path": ".",
+	})
+	if isErr || !strings.Contains(out, "a.txt") {
+		t.Errorf("glob 相对路径应按机器 workdir 解析: %s", out)
+	}
+}
+
 // ---------- 3. ~ 展开 ----------
