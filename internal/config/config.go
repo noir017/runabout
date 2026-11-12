@@ -22,8 +22,32 @@ type Config struct {
 	Server Server `yaml:"server"`
 	Auth   Auth   `yaml:"auth"`
 	Tools  Tools  `yaml:"tools"`
+	Fleet  Fleet  `yaml:"fleet"`
 	Policy Policy `yaml:"policy"`
 	Audit  Audit  `yaml:"audit"`
+}
+
+// Fleet 是可选的机群配置。不写 hosts 时保持单机模式：工具里不出现 target 参数。
+type Fleet struct {
+	// SSHCommand 是远端调用的前缀，后面依次追加 <主机> <命令>。
+	SSHCommand []string `yaml:"ssh_command"`
+	// ProbeTimeout 是 servers 总览里单台机器的探测超时。
+	ProbeTimeout time.Duration `yaml:"probe_timeout"`
+	// ApprovalCheck 用来判断需审批的机器当前是否已授权：{host} 替换成机器名，
+	// 退出码 0 表示已授权。它只查询本地状态，不发起申请。
+	ApprovalCheck string      `yaml:"approval_check"`
+	Hosts         []FleetHost `yaml:"hosts"`
+}
+
+// FleetHost 是一台远端机器。
+type FleetHost struct {
+	// Name 是机器名，同时也是 ssh 别名；别名不同时用 SSH 指定。
+	Name string `yaml:"name"`
+	Desc string `yaml:"desc"`
+	SSH  string `yaml:"ssh"`
+	// Approval 表示连接这台机器需要人工审批。runabout 不实现审批，
+	// 它只影响工具描述里的提示和 servers 总览是否主动去连。
+	Approval bool `yaml:"approval"`
 }
 
 type Server struct {
@@ -209,19 +233,23 @@ func Default() *Config {
 					"__pycache__", "dist", "build", "target", ".next", ".cache", ".mypy_cache"},
 			},
 		},
+		Fleet: Fleet{
+			SSHCommand:   []string{"ssh", "-o", "BatchMode=yes"},
+			ProbeTimeout: 10 * time.Second,
+		},
 		Policy: Policy{
 			ConfirmTTL: 5 * time.Minute,
 			WriteDenyPaths: []string{
 				"/proc/**", "/sys/**", "/dev/**", "/boot/**", "/run/**",
 				"/etc/shadow", "/etc/gshadow", "/etc/sudoers", "/etc/sudoers.d/**",
-				"~/.ssh/authorized_keys",
+				"**/.ssh/authorized_keys",
 			},
 			ReadDenyPaths: []string{
 				"/etc/shadow", "/etc/gshadow",
-				"~/.ssh/id_*", "~/.ssh/*_rsa", "~/.ssh/*_ed25519", "~/.ssh/*_ecdsa",
-				"~/.ssh/igithub", "~/.ssh/gcp_key",
-				"~/.aws/credentials", "~/.config/gh/hosts.yml", "~/.docker/config.json",
-				"~/.kube/config", "~/.netrc",
+				"**/.ssh/id_*", "**/.ssh/*_rsa", "**/.ssh/*_ed25519", "**/.ssh/*_ecdsa",
+				"**/.ssh/igithub", "**/.ssh/gcp_key",
+				"**/.aws/credentials", "**/.config/gh/hosts.yml", "**/.docker/config.json",
+				"**/.kube/config", "**/.netrc",
 			},
 		},
 		Audit: Audit{Enabled: true, LogArgs: true, MaxArgs: 4000},
@@ -316,10 +344,43 @@ func (c *Config) Normalize() error {
 	if c.Audit.Enabled && c.Audit.File == "" {
 		c.Audit.File = filepath.Join(c.Server.DataDir, "audit.jsonl")
 	}
+	if err := c.normalizeFleet(); err != nil {
+		return err
+	}
 	// 服务自身的数据目录永远不允许被文件工具改写，否则 agent 可以自签令牌。
 	c.Policy.WriteDenyPaths = append(c.Policy.WriteDenyPaths,
 		c.Server.DataDir, filepath.Join(c.Server.DataDir, "**"))
 	c.Policy.ReadDenyPaths = append(c.Policy.ReadDenyPaths, filepath.Join(c.Server.DataDir, "**"))
+	return nil
+}
+
+// normalizeFleet 补齐机群默认值并校验机器名。
+func (c *Config) normalizeFleet() error {
+	f := &c.Fleet
+	if len(f.SSHCommand) == 0 {
+		f.SSHCommand = []string{"ssh", "-o", "BatchMode=yes"}
+	}
+	if f.ProbeTimeout <= 0 {
+		f.ProbeTimeout = 10 * time.Second
+	}
+	seen := map[string]bool{"local": true}
+	for i := range f.Hosts {
+		h := &f.Hosts[i]
+		h.Name = strings.TrimSpace(h.Name)
+		if h.Name == "" {
+			return fmt.Errorf("fleet.hosts[%d].name 不能为空", i)
+		}
+		if h.Name == "local" {
+			return fmt.Errorf("fleet.hosts 里不能用保留名 %q", h.Name)
+		}
+		if seen[h.Name] {
+			return fmt.Errorf("fleet.hosts 里的机器名 %q 重复", h.Name)
+		}
+		seen[h.Name] = true
+		if strings.TrimSpace(h.SSH) == "" {
+			h.SSH = h.Name
+		}
+	}
 	return nil
 }
 

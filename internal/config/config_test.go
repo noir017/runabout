@@ -25,6 +25,46 @@ func TestExampleConfigParses(t *testing.T) {
 	}
 }
 
+func TestFleetDefaultsAndValidation(t *testing.T) {
+	base := func() *Config {
+		cfg := Default()
+		cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x"}}
+		return cfg
+	}
+
+	cfg := base()
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Fleet.Hosts) != 0 {
+		t.Error("默认不应有机群机器")
+	}
+	if len(cfg.Fleet.SSHCommand) == 0 || cfg.Fleet.ProbeTimeout <= 0 {
+		t.Error("fleet 默认值没填上")
+	}
+
+	cfg = base()
+	cfg.Fleet.Hosts = []FleetHost{{Name: "web1"}}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Fleet.Hosts[0].SSH != "web1" {
+		t.Errorf("ssh 别名应默认等于机器名，得到 %q", cfg.Fleet.Hosts[0].SSH)
+	}
+
+	for _, bad := range [][]FleetHost{
+		{{Name: "local"}},
+		{{Name: "web1"}, {Name: "web1"}},
+		{{Name: ""}},
+	} {
+		cfg = base()
+		cfg.Fleet.Hosts = bad
+		if err := cfg.Normalize(); err == nil {
+			t.Errorf("非法机器清单应报错: %+v", bad)
+		}
+	}
+}
+
 func TestBaseURLRequired(t *testing.T) {
 	cfg := Default()
 	cfg.Server.BaseURL = ""
