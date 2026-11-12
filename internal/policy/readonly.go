@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // CheckReadOnly 判断一条命令是否完全由白名单里的只读命令组成。
@@ -11,6 +13,9 @@ import (
 // 写重定向、白名单外的命令一律拒绝。query 工具靠它保证"不产生副作用"。
 func CheckReadOnly(command string) error {
 	home, _ := os.UserHomeDir()
+	if err := checkReadOnlyAST(command); err != nil {
+		return err
+	}
 	script := ParseShell(command, home)
 	if script.ParseErr != nil {
 		return fmt.Errorf("命令语法无法解析：%v", script.ParseErr)
@@ -22,6 +27,50 @@ func CheckReadOnly(command string) error {
 		if err := checkReadOnlyCmd(c); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// checkReadOnlyAST 按节点类型做允许列表：只允许简单命令、管道、&&、||、;。
+// 赋值、声明、函数、子 shell、算术、test、if/for/while/case 等结构直接拒绝，
+// 避免 shellparse.go 只给 CallExpr 建 Cmd 留下的空档。
+func checkReadOnlyAST(src string) error {
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	file, err := parser.Parse(strings.NewReader(src), "cmd")
+	if err != nil {
+		return fmt.Errorf("命令语法无法解析：%v", err)
+	}
+	var bad string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if node == nil || bad != "" {
+			return false
+		}
+		switch n := node.(type) {
+		case *syntax.File, *syntax.Word, *syntax.Lit, *syntax.SglQuoted,
+			*syntax.DblQuoted, *syntax.ParamExp, *syntax.Redirect, *syntax.Comment:
+			return true
+		case *syntax.Stmt:
+			if n.Background || n.Coprocess || n.Disown {
+				bad = "后台或协程语句"
+				return false
+			}
+			return true
+		case *syntax.CallExpr:
+			return true
+		case *syntax.BinaryCmd:
+			switch n.Op {
+			case syntax.AndStmt, syntax.OrStmt, syntax.Pipe, syntax.PipeAll:
+				return true
+			}
+			bad = "不支持的运算符 " + n.Op.String()
+			return false
+		default:
+			bad = fmt.Sprintf("%T", node)
+			return false
+		}
+	})
+	if bad != "" {
+		return fmt.Errorf("只读查询不接受这种 shell 结构（%s）", bad)
 	}
 	return nil
 }
@@ -53,9 +102,17 @@ func checkReadOnlyCmd(c *Cmd) error {
 			return fmt.Errorf("包含写重定向或无法确认的重定向 %q", r.Op)
 		}
 	}
-	argv, unres := c.Effective()
+	// 用原始 argv，而不是 Effective：query 只允许不带选项的 sudo，
+	// env/timeout/nice/command/xargs/nohup 等包装一律拒绝。
+	argv, unres := c.Argv, c.Unresolved
 	if len(argv) == 0 {
 		return fmt.Errorf("空命令")
+	}
+	if baseName(argv[0]) == "sudo" {
+		if len(argv) < 2 || strings.HasPrefix(argv[1], "-") {
+			return fmt.Errorf("sudo 只允许不带选项地直接跟只读命令")
+		}
+		argv, unres = argv[1:], unres[1:]
 	}
 	if strings.ContainsRune(argv[0], '/') {
 		return fmt.Errorf("命令名 %q 带路径，只读查询只接受白名单里的命令名", argv[0])
@@ -63,9 +120,6 @@ func checkReadOnlyCmd(c *Cmd) error {
 	if len(c.Assigns) > 0 {
 		return fmt.Errorf("命令带变量赋值前缀（%s=...），会改变被调命令的行为，只读查询不允许",
 			c.Assigns[0])
-	}
-	if hasEnvAssignment(c.Argv) {
-		return fmt.Errorf("env 带变量赋值，会改变被调命令的行为，只读查询不允许")
 	}
 	for i, u := range unres {
 		if u {
@@ -88,20 +142,6 @@ func checkReadOnlyCmd(c *Cmd) error {
 		return spec.check(argv[1:])
 	}
 	return nil
-}
-
-// hasEnvAssignment 识别 env PATH=... ls 这种写法。Effective 会把 env 的
-// 赋值参数当成包装跳过，只读判定必须自己拦。
-func hasEnvAssignment(argv []string) bool {
-	if len(argv) == 0 || baseName(argv[0]) != "env" {
-		return false
-	}
-	for _, a := range argv[1:] {
-		if strings.Contains(a, "=") {
-			return true
-		}
-	}
-	return false
 }
 
 // readOnlyRedirect 只放行读入和文件描述符复制；>、>>、&> 等写重定向一律拒绝。
@@ -131,8 +171,11 @@ func isDigits(s string) bool {
 // 短选项按字母判定；不在列表里的一律拒绝。
 type cmdSpec struct {
 	long       map[string]bool
+	longValue  map[string]bool
 	short      string
 	shortValue string
+	// shortRequired 是必须带值的短选项；没有紧贴值时跳过下一个 token。
+	shortRequired string
 	// custom 非空时替代通用选项检查（find 的谓词是单横线长词）。
 	custom func([]string) error
 	// check 在选项检查之后做子命令/位置参数判定。
@@ -151,7 +194,8 @@ func set(names string) map[string]bool {
 // 所以 --out= 不会因为像 --output 而被放行。
 func checkOptions(args []string, spec cmdSpec) error {
 	end := false
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if end {
 			continue
 		}
@@ -161,22 +205,32 @@ func checkOptions(args []string, spec cmdSpec) error {
 		}
 		if strings.HasPrefix(a, "--") {
 			name := strings.TrimPrefix(a, "--")
-			if i := strings.IndexByte(name, '='); i >= 0 {
-				name = name[:i]
+			attached := false
+			if j := strings.IndexByte(name, '='); j >= 0 {
+				name = name[:j]
+				attached = true
 			}
 			if name == "" || !spec.long[name] {
 				return fmt.Errorf("不支持的选项 %q", a)
+			}
+			// 需要值的选项把下一个 token 当值跳过，值以 - 开头也合法。
+			if !attached && spec.longValue[name] && i+1 < len(args) {
+				i++
 			}
 			continue
 		}
 		if strings.HasPrefix(a, "-") && a != "-" {
 			letters := a[1:]
-			for i := 0; i < len(letters); i++ {
-				ch := letters[i]
+			for j := 0; j < len(letters); j++ {
+				ch := letters[j]
 				if !strings.ContainsRune(spec.short, rune(ch)) {
 					return fmt.Errorf("不支持的短选项 %q", a)
 				}
 				if strings.ContainsRune(spec.shortValue, rune(ch)) {
+					if j == len(letters)-1 && strings.ContainsRune(spec.shortRequired, rune(ch)) &&
+						i+1 < len(args) {
+						i++
+					}
 					break // 后面的部分是选项值
 				}
 			}
@@ -193,22 +247,28 @@ var readonlySpecs = map[string]cmdSpec{
 			recursive size sort time time-style version help classify dereference-command-line
 			dereference-command-line-symlink-to-dir dereference no-group width tabsize zero
 			context si hyperlink`),
-		short:      "1AaBbCcDdFfGgHhiIklLmMnNopQqRrSsTtUuVvWwXxZ",
-		shortValue: "ITw",
+		short:         "1AaBbCcDdFfGgHhiIklLmMnNopQqRrSsTtUuVvWwXxZ",
+		shortValue:    "ITw",
+		longValue:     set(`block-size format hide ignore indicator-style quoting-style sort time time-style width tabsize`),
+		shortRequired: "ITw",
 	},
 	"cat": {
 		long:  set(`show-all number-nonblank number squeeze-blank show-ends show-tabs show-nonprinting help version`),
 		short: "AbeEnstTuv",
 	},
 	"head": {
-		long:       set(`bytes lines quiet silent verbose zero-terminated help version`),
-		short:      "0123456789cnqvz",
-		shortValue: "cn",
+		long:          set(`bytes lines quiet silent verbose zero-terminated help version`),
+		short:         "0123456789cnqvz",
+		shortValue:    "cn",
+		longValue:     set(`bytes lines`),
+		shortRequired: "cn",
 	},
 	"tail": {
-		long:       set(`bytes lines follow retry pid sleep-interval max-unchanged-stats quiet silent verbose zero-terminated help version`),
-		short:      "0123456789cFfnqsvz",
-		shortValue: "cns",
+		long:          set(`bytes lines follow retry pid sleep-interval max-unchanged-stats quiet silent verbose zero-terminated help version`),
+		short:         "0123456789cFfnqsvz",
+		shortValue:    "cns",
+		longValue:     set(`bytes lines pid sleep-interval max-unchanged-stats`),
+		shortRequired: "cns",
 	},
 	"grep": {
 		long: set(`basic-regexp extended-regexp fixed-strings perl-regexp regexp file
@@ -220,6 +280,9 @@ var readonlySpecs = map[string]cmdSpec{
 			unix-byte-offsets help version include exclude exclude-from exclude-dir max-count`),
 		short:      "ABCDEFGHILPTUabcdefhilmnoqrsuvwxyz",
 		shortValue: "ABCDefm",
+		longValue: set(`regexp file max-count after-context before-context context label include
+			exclude exclude-from exclude-dir directories devices binary-files group-separator`),
+		shortRequired: "ABCDefm",
 	},
 	"rg": {
 		long: set(`type type-not type-add type-clear type-list glob iglob glob-case-insensitive
@@ -240,31 +303,46 @@ var readonlySpecs = map[string]cmdSpec{
 			vimgrep no-vimgrep replace no-replace path-separator no-path-separator pre-glob`),
 		short:      "0123456789aAbBcCdEeFfghHiIjLlMmNnoPpqrRsStTuUvVwxz",
 		shortValue: "ABCdeEfgjmMrtT",
+		longValue: set(`type type-not type-add type-clear glob iglob max-count max-depth
+			max-filesize context after-context before-context context-separator
+			field-context-separator field-match-separator threads encoding engine
+			regex-size-limit dfa-size-limit ignore-file replace sort sortr path-separator
+			pre-glob colors`),
+		shortRequired: "ABCdeEfgjmMrtT",
 	},
 	"find": {custom: checkFind},
 	"df": {
 		long: set(`all block-size human-readable si inodes local no-sync output portability
 			print-type type exclude help version`),
-		short:      "aBhiHklPtTvx",
-		shortValue: "Btx",
+		short:         "aBhiHklPtTvx",
+		shortValue:    "Btx",
+		longValue:     set(`block-size output type exclude`),
+		shortRequired: "Btx",
 	},
 	"du": {
 		long: set(`all apparent-size block-size bytes count-links dereference dereference-args
 			human-readable si inodes max-depth null one-file-system summarize total threshold
 			time time-style exclude help version`),
-		short:      "abBcDhHklLmPsStTx",
-		shortValue: "Bdt",
+		short:         "abBcDhHklLmPsStTx",
+		shortValue:    "Bdt",
+		longValue:     set(`block-size max-depth threshold time-style exclude`),
+		shortRequired: "Bdt",
 	},
 	"free": {
-		long:       set(`bytes kilo mega giga tera peta human si wide low high total count seconds lohi help version`),
-		short:      "bkmghHwcltsv",
-		shortValue: "cs",
+		long:          set(`bytes kilo mega giga tera peta human si wide low high total count seconds lohi help version`),
+		short:         "bkmghHwcltsv",
+		shortValue:    "cs",
+		longValue:     set(`count seconds`),
+		shortRequired: "cs",
 	},
 	"ps": {
 		long: set(`sort format forest headers no-headers cols columns rows width context
 			deselect ppid pid sid tty user group Group quick-pid info personality help version`),
 		short:      "AadefgGhHlLoOpqrsStTuUvwxyzZcCjMnNVWX",
 		shortValue: "gGopOstuUC",
+		longValue: set(`sort format cols columns rows width context ppid pid sid tty user group
+			Group quick-pid personality`),
+		shortRequired: "gGopqOstuUC",
 	},
 	"uptime": {
 		long:  set(`pretty since help version`),
@@ -276,18 +354,12 @@ var readonlySpecs = map[string]cmdSpec{
 			closed close-wait last-ack closing state exclude processes info memory options timer
 			summary numeric resolve family address no-header oneline extended ipv4 ipv6 wide
 			bytes help version`),
-		short:      "hVnraloempsitu46012389bcEfFgMNPqTwxyzZAd",
-		shortValue: "AfFNP",
+		short:         "hVnraloempsitu46012389bcEfFgMNPqTwxyzZAd",
+		shortValue:    "AfFNP",
+		longValue:     set(`state exclude family address`),
+		shortRequired: "AfFNP",
 	},
-	"ip": {
-		long: set(`brief statistics json oneline resolve details family netns loops rcvbuf
-			timestamp timestampns force human pretty version help all numeric protocol scope
-			to from table vrf name group dev via src metric mtu advmss rtt rttvar window cwnd
-			ssthresh realms hoplimit encap iif oif mark priority pref proto nhid tun_id remote
-			local ttl tos dsfield key seq ack`),
-		short: "abcdefghijklmnopqrstuvwxyzV46",
-		check: checkIP,
-	},
+	"ip": {custom: checkIP},
 	"journalctl": {
 		long: set(`system user global no-pager no-hostname no-full full lines output output-fields
 			reverse show-cursor cursor after-cursor since until unit identifier priority grep
@@ -295,6 +367,10 @@ var readonlySpecs = map[string]cmdSpec{
 			list-catalogs dump-catalog fields field list-fields synced namespace root directory
 			file machine boot list-boots utc no-utc help version`),
 		short: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+		longValue: set(`since until unit identifier priority grep lines output output-fields
+			cursor after-cursor directory file root namespace machine field`),
+		shortValue:    "cCDgnopStuU",
+		shortRequired: "cCDgnopStuU",
 	},
 	"systemctl": {
 		long: set(`system user global no-pager no-legend no-block quiet full value recursive
@@ -303,7 +379,11 @@ var readonlySpecs = map[string]cmdSpec{
 			help version no-ask-password message check-inhibitors legend no-hostname
 			with-dependencies`),
 		short: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
-		check: checkSystemctl,
+		longValue: set(`job-mode state type property lines output timestamp host machine root
+			image drop-in signal kill-whom what message`),
+		shortValue:    "tpnoHMs",
+		shortRequired: "tpnoHMs",
+		check:         checkSystemctl,
 	},
 	"docker": {
 		long: set(`all filter format last latest no-trunc quiet size details follow since tail
@@ -312,20 +392,29 @@ var readonlySpecs = map[string]cmdSpec{
 			config log-level tls tlscacert tlscert tlskey tlsverify no-color debug api-version
 			config-file help version`),
 		short: "afqstlHcvnp",
-		check: checkDocker,
+		longValue: set(`filter format last since tail until file project-name project-directory
+			env-file profile ansi progress parallel host context config log-level tlscacert
+			tlscert tlskey api-version config-file`),
+		shortValue:    "Hcln",
+		shortRequired: "Hcln",
+		check:         checkDocker,
 	},
 	"stat": {
-		long:       set(`format printf file-system dereference terse help version`),
-		short:      "cfLt",
-		shortValue: "cf",
+		long:          set(`format printf file-system dereference terse help version`),
+		short:         "cfLt",
+		shortValue:    "cf",
+		longValue:     set(`format printf`),
+		shortRequired: "cf",
 	},
 	"file": {
 		long: set(`brief checking-printout debug dereference exclude exclude-quiet extension help
 			keep-going list magic-file mime mime-encoding mime-type no-buffer no-pad no-sandbox
 			preserve-date print0 raw special-files uncompress uncompress-noreport version
 			parameter separator apple`),
-		short:      "abcdeEfhiklLmNnpPrsSvz0",
-		shortValue: "efFmP",
+		short:         "abcdeEfhiklLmNnpPrsSvz0",
+		shortValue:    "efFmP",
+		longValue:     set(`exclude magic-file parameter separator extension`),
+		shortRequired: "efFmP",
 	},
 	"wc": {
 		long:  set(`bytes chars lines max-line-length words help version`),
@@ -336,8 +425,10 @@ var readonlySpecs = map[string]cmdSpec{
 			ignore-case key merge month-sort numeric-sort reverse random-sort random-source sort
 			stable buffer-size field-separator unique zero-terminated version parallel
 			files0-from batch-size`),
-		short:      "bcCdfghikmMnrRsStuzV",
-		shortValue: "kSt",
+		short:         "bcCdfghikmMnrRsStuzV",
+		shortValue:    "kSt",
+		longValue:     set(`key field-separator buffer-size random-source files0-from batch-size parallel`),
+		shortRequired: "kSt",
 	},
 	"uname": {
 		long:  set(`all kernel-name nodename kernel-release kernel-version machine processor hardware-platform operating-system help version`),
@@ -379,10 +470,125 @@ var readonlySpecs = map[string]cmdSpec{
 		long: set(`all ignore help version`),
 	},
 	"date": {
-		long:       set(`date file iso-8601 reference rfc-2822 rfc-3339 universal utc debug help version`),
-		short:      "dfIruR",
-		shortValue: "dfIr",
-		check:      checkDate,
+		long:          set(`date file iso-8601 reference rfc-2822 rfc-3339 universal utc debug help version`),
+		short:         "dfIruR",
+		shortValue:    "dfIr",
+		longValue:     set(`date file reference`),
+		shortRequired: "dfr",
+		check:         checkDate,
+	},
+	"lsof": {
+		long:          set(`help version`),
+		short:         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ?",
+		shortValue:    "cCdFfgGikmMnoOpPrRsSTuxXzZ",
+		shortRequired: "cdFgkmopu",
+	},
+	"netstat": {
+		long: set(`all numeric tcp udp raw unix listening program statistics route interfaces
+			extend wide timers masquerade fib groups help version`),
+		short:         "aAcCdefFgGhHilMnNoOprRsStTuUvVwWxXZ",
+		shortValue:    "AF",
+		longValue:     set(`family protocol`),
+		shortRequired: "AF",
+	},
+	"lsblk": {
+		long: set(`all bytes discard dedup nodeps fs help include inverse json list merge
+			noempty output output-all pairs paths perms raw resolve scsi sort sysroot topology
+			tree version width zoned`),
+		short:         "AabDdEefhiIJlMmMnOoPpPrsStTuvwxz",
+		shortValue:    "EeIoTw",
+		longValue:     set(`dedup include exclude output sort sysroot width`),
+		shortRequired: "EeIow",
+	},
+	"blkid": {
+		long: set(`no-encoding help info list-one label list-names output offset probe
+			match-tag match-token uuid usage version hint`),
+		short:         "dhilLnOopstuUvVH",
+		shortValue:    "LoOstuH",
+		longValue:     set(`label output offset match-tag match-token uuid hint`),
+		shortRequired: "LoOstuH",
+	},
+	"lscpu": {
+		long: set(`all online bytes caches offline json extended parse sysroot hex physical
+			output-all help version`),
+		short:         "abBCcJespxy",
+		shortValue:    "Ceps",
+		longValue:     set(`sysroot`),
+		shortRequired: "s",
+	},
+	"who": {
+		long: set(`all boot dead heading login lookup mesg message process count runlevel short
+			time users help version`),
+		short: "abHdlmpqrstTu",
+	},
+	"last": {
+		long: set(`hostlast dns file fulltimes ip limit nohostname since until present
+			fullnames system help version`),
+		short:         "0123456789adfFinRstpwx",
+		shortValue:    "fnstp",
+		longValue:     set(`file limit since until present`),
+		shortRequired: "fnstp",
+	},
+	"md5sum": {
+		long:  set(`binary check tag text warn strict status quiet ignore-missing zero help version`),
+		short: "bctwz",
+	},
+	"sha256sum": {
+		long:  set(`binary check tag text warn strict status quiet ignore-missing zero help version`),
+		short: "bctwz",
+	},
+	"base64": {
+		long:          set(`decode ignore-garbage wrap help version`),
+		short:         "diw",
+		shortValue:    "w",
+		longValue:     set(`wrap`),
+		shortRequired: "w",
+	},
+	"cut": {
+		long: set(`bytes characters delimiter fields only-delimited complement
+			output-delimiter zero-terminated help version`),
+		short:         "bcdfnsz",
+		shortValue:    "bcdf",
+		longValue:     set(`bytes characters delimiter fields output-delimiter`),
+		shortRequired: "bcdf",
+	},
+	"tr": {
+		long:  set(`complement delete squeeze-repeats truncate-set1 help version`),
+		short: "cCdst",
+	},
+	"dig": {
+		long:          set(`help version`),
+		short:         "46bcdfhkmnpqtuvxy",
+		shortValue:    "bcfkpqtxy",
+		shortRequired: "bcfkpqtxy",
+	},
+	"realpath": {
+		long: set(`canonicalize-existing canonicalize-missing logical physical quiet strip
+			no-symlinks zero relative-to relative-base help version`),
+		short:     "emLPqsz",
+		longValue: set(`relative-to relative-base`),
+	},
+	"readlink": {
+		long: set(`canonicalize canonicalize-existing canonicalize-missing no-newline quiet
+			silent verbose zero help version`),
+		short: "femnqsvz",
+	},
+	"dirname": {
+		long:  set(`zero help version`),
+		short: "z",
+	},
+	"basename": {
+		long:          set(`multiple suffix zero help version`),
+		short:         "asz",
+		shortValue:    "s",
+		longValue:     set(`suffix`),
+		shortRequired: "s",
+	},
+	"logread": {
+		long:          set(`help version`),
+		short:         "flzsprFSeh",
+		shortValue:    "lsp",
+		shortRequired: "lsp",
 	},
 }
 
@@ -520,9 +726,33 @@ func checkDocker(args []string) error {
 	return nil
 }
 
-var ipValueOpts = map[string]bool{
-	"-n": true, "-netns": true, "-f": true, "-family": true,
-	"-l": true, "-loops": true, "-rc": true, "-rcvbuf": true,
+var ipOptionNames = map[string]bool{
+	"s": true, "stats": true, "statistics": true,
+	"d": true, "details": true,
+	"l": true, "loops": true,
+	"o": true, "oneline": true,
+	"r": true, "resolve": true,
+	"n": true, "netns": true,
+	"N": true, "Numeric": true,
+	"f": true, "family": true,
+	"4": true, "6": true, "0": true,
+	"M": true, "B": true,
+	"br": true, "brief": true,
+	"j": true, "json": true,
+	"p": true, "pretty": true,
+	"c": true, "color": true,
+	"t": true, "timestamp": true,
+	"ts": true, "tshort": true,
+	"rc": true, "rcvbuf": true,
+	"a": true, "all": true,
+	"h": true, "human": true,
+	"iec": true,
+	"V":   true, "Version": true,
+}
+
+var ipOptionValue = map[string]bool{
+	"l": true, "loops": true, "f": true, "family": true,
+	"n": true, "netns": true, "rc": true, "rcvbuf": true,
 }
 
 var ipObjects = map[string]bool{
@@ -534,31 +764,64 @@ var ipObjects = map[string]bool{
 }
 
 var ipReadVerbs = map[string]bool{
-	"show": true, "list": true, "get": true, "help": true, "ls": true,
-	"identify": true, "pids": true,
+	"show": true, "list": true, "ls": true, "get": true,
 }
 
+// checkIP 先按允许列表解析全局选项，再检查对象和动词。
+// ip 的单横线长选项不能当成短选项字母集合，否则 -batch 会被放过。
 func checkIP(args []string) error {
-	for _, a := range args {
-		if a == "-b" || a == "--batch" || strings.HasPrefix(a, "--batch=") {
-			return fmt.Errorf("ip %s 会执行文件里的任意 ip 命令，只读查询不允许", a)
-		}
+	pos, err := parseIPOptions(args)
+	if err != nil {
+		return err
 	}
-	i, ok := firstPositionalIndex(args, ipValueOpts)
-	if !ok {
+	if len(pos) == 0 {
 		return fmt.Errorf("ip 缺少对象，例如 ip addr show")
 	}
-	obj := args[i]
+	obj := pos[0]
 	if !ipObjects[obj] {
 		return fmt.Errorf("ip %s 不是只读对象", obj)
 	}
-	if j, ok := firstPositionalIndex(args[i+1:], ipValueOpts); ok {
-		verb := args[i+1+j]
-		if !ipReadVerbs[verb] {
-			return fmt.Errorf("ip %s %s 会修改网络配置，只读查询不允许", obj, verb)
-		}
+	if len(pos) > 1 && !ipReadVerbs[pos[1]] {
+		return fmt.Errorf("ip %s %s 会修改网络配置，只读查询不允许", obj, pos[1])
 	}
 	return nil
+}
+
+func parseIPOptions(args []string) ([]string, error) {
+	var pos []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			pos = append(pos, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			pos = append(pos, a)
+			continue
+		}
+		name := strings.TrimPrefix(a, "-")
+		if strings.HasPrefix(name, "-") {
+			name = strings.TrimPrefix(name, "-")
+		}
+		val := ""
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			val = name[eq+1:]
+			name = name[:eq]
+		}
+		if name == "b" || name == "batch" || name == "force" {
+			return nil, fmt.Errorf("ip -%s 会执行文件里的命令或强制操作，只读查询不允许", name)
+		}
+		if !ipOptionNames[name] {
+			return nil, fmt.Errorf("不支持的 ip 选项 %q", a)
+		}
+		if ipOptionValue[name] && val == "" {
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("ip -%s 缺少参数", name)
+			}
+			i++
+		}
+	}
+	return pos, nil
 }
 
 func checkHostname(args []string) error {
