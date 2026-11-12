@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -167,6 +169,31 @@ func TestReadRemote(t *testing.T) {
 	}
 }
 
+func TestReadRemoteImage(t *testing.T) {
+	d, dir := newFleetDeps(t, config.Fleet{})
+	png, err := base64.StdEncoding.DecodeString(
+		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pixel.png"), png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"target": "web1", "path": "pixel.png"})
+	res, err := (&readTool{d: d}).Call(&mcp.CallContext{
+		Ctx: context.Background(), Principal: mcp.Principal{Subject: "tester"},
+	}, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Content) != 2 || res.Content[1].Type != "image" || res.Content[1].MimeType != "image/png" {
+		t.Fatalf("远端图片应返回 image 块: %+v", res.Content)
+	}
+	if !strings.Contains(res.Content[0].Text, "[web1]") {
+		t.Errorf("图片说明应带机器名: %s", res.Content[0].Text)
+	}
+}
+
 func TestApplyPatchRemoteKeepsInode(t *testing.T) {
 	d, dir := newFleetDeps(t, config.Fleet{})
 	f := filepath.Join(dir, "app.conf")
@@ -247,6 +274,10 @@ func TestServersOverviewSkipsApprovalHost(t *testing.T) {
 	}
 	if strings.Contains(string(data), "nas") {
 		t.Errorf("没配 approval_check 时不应探测需审批的机器:\n%s", data)
+	}
+	out, isErr = call(t, &serversTool{d: d}, map[string]any{"target": "nas"})
+	if !isErr || !strings.Contains(out, "需审批") {
+		t.Errorf("详情也应拒绝未授权的机器: %s", out)
 	}
 }
 
