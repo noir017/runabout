@@ -19,6 +19,7 @@ import (
 type readTool struct{ d *Deps }
 
 type readArgs struct {
+	Target string `json:"target"`
 	Path   string `json:"path"`
 	Offset int    `json:"offset"`
 	Limit  int    `json:"limit"`
@@ -27,6 +28,10 @@ type readArgs struct {
 
 func (t *readTool) Definition() mcp.ToolDef {
 	fs := t.d.Cfg.Tools.FS
+	remoteDoc := ""
+	if t.d.fleetEnabled() {
+		remoteDoc = "\n- 远端图片同样直接返回图像；读不到时先用 shell 确认路径和权限。"
+	}
 	return mcp.ToolDef{
 		Name:  "read",
 		Title: "读取文件",
@@ -35,16 +40,20 @@ func (t *readTool) Definition() mcp.ToolDef {
 - 默认从第 1 行起最多 %d 行；大文件请用 offset/limit 分段读。
 - 单行超过 %d 字符会被截断。
 - raw=true 时不加行号，适合需要原样内容的场景。
-- 图片（png/jpg/gif/webp）会以图像形式返回；其他二进制文件会被拒绝，请改用 shell 里的 xxd/file。
+- 图片（png/jpg/gif/webp）会以图像形式返回；其他二进制文件会被拒绝，请改用 shell 里的 xxd/file。%s
 - 少数凭据类文件（私钥、云凭据等）被策略禁止读取，会返回明确错误。`,
-			fs.DefaultLines, fs.MaxLineChars),
-		InputSchema: schema(map[string]any{
-			"path":   strProp("文件路径，绝对或相对（相对于服务默认工作目录）"),
+			fs.DefaultLines, fs.MaxLineChars, remoteDoc),
+		InputSchema: schema(t.d.withTarget(map[string]any{
+			"path":   strProp("文件路径，绝对或相对（相对于默认工作目录）"),
 			"offset": intProp("起始行号，从 1 开始", 1, 0),
 			"limit":  intProp("最多读取多少行", 1, 0),
 			"raw":    boolProp("不输出行号"),
-		}, "path"),
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: mcp.Ptr(true)},
+		}), "path"),
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:    mcp.Ptr(true),
+			IdempotentHint:  mcp.Ptr(true),
+			DestructiveHint: mcp.Ptr(false),
+		},
 	}
 }
 
@@ -53,43 +62,47 @@ func (t *readTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 	if err := decodeArgs(raw, &a); err != nil {
 		return nil, mcp.Errorf(mcp.CodeInvalidParams, "%s", err.Error())
 	}
-	abs, err := t.d.Paths.CheckRead(a.Path)
+	target, err := t.d.resolveTarget(a.Target)
 	if err != nil {
-		t.d.Audit.Policy(cc.Principal, cc.SessionID, "read", "denied", "path-deny", a.Path, "", err.Error())
 		return mcp.ToolError("%s", err.Error()), nil
 	}
-	st, err := os.Stat(abs)
+	fsys, guard := t.d.fsFor(target)
+	abs, err := resolveReadPath(t.d, target, guard, a.Path)
 	if err != nil {
-		return mcp.ToolError("无法访问 %s: %v", abs, err), nil
+		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "read", target.name, "denied", "path-deny", a.Path, "", err.Error())
+		return mcp.ToolError("%s", err.Error()), nil
 	}
-	if st.IsDir() {
-		return mcp.ToolError("%s 是目录，请用 list_dir", abs), nil
+	st, err := fsys.Stat(cc.Ctx, abs)
+	if err != nil {
+		if isConnectError(err) {
+			return mcp.ToolError("%s", targetError(target.name, err)), nil
+		}
+		return mcp.ToolError("%s无法访问 %s：%v", label(target), abs, err), nil
+	}
+	if st.IsDir {
+		return mcp.ToolError("%s%s 是目录，请用 list_dir", label(target), abs), nil
 	}
 	fs := t.d.Cfg.Tools.FS
-	if st.Size() > int64(fs.MaxReadBytes) {
-		return mcp.ToolError("文件 %s 有 %s，超过单次读取上限 %s；请用 offset/limit 分段读，"+
+	if st.Size > int64(fs.MaxReadBytes) {
+		return mcp.ToolError("%s文件 %s 有 %s，超过单次读取上限 %s；请用 offset/limit 分段读，"+
 			"或用 shell 里的 sed -n / rg 定位后再读",
-			abs, humanBytes(st.Size()), humanBytes(int64(fs.MaxReadBytes))), nil
+			label(target), abs, humanBytes(st.Size), humanBytes(int64(fs.MaxReadBytes))), nil
 	}
 
-	data, err := os.ReadFile(abs)
+	data, err := fsys.ReadFile(cc.Ctx, abs)
 	if err != nil {
-		return mcp.ToolError("读取 %s 失败: %v", abs, err), nil
+		if isConnectError(err) {
+			return mcp.ToolError("%s", targetError(target.name, err)), nil
+		}
+		return mcp.ToolError("%s读取 %s 失败：%v", label(target), abs, err), nil
 	}
 
 	if mime, isImg := imageMime(abs); isImg {
-		if len(data) > fs.MaxImageBytes {
-			return mcp.ToolError("图片 %s 有 %s，超过上限 %s", abs, humanBytes(int64(len(data))),
-				humanBytes(int64(fs.MaxImageBytes))), nil
-		}
-		return &mcp.CallToolResult{Content: []mcp.Content{
-			mcp.TextContent(fmt.Sprintf("图片 %s（%s，%s）", abs, mime, humanBytes(int64(len(data))))),
-			mcp.ImageContent(base64.StdEncoding.EncodeToString(data), mime),
-		}}, nil
+		return imageResult(label(target), abs, mime, data, fs.MaxImageBytes), nil
 	}
 	if isBinary(data) {
-		return mcp.ToolError("%s 看起来是二进制文件（%s）。如需查看请用 shell：file %s / xxd %s | head",
-			abs, humanBytes(st.Size()), abs, abs), nil
+		return mcp.ToolError("%s%s 看起来是二进制文件（%s）。如需查看请用 shell：file %s / xxd %s | head",
+			label(target), abs, humanBytes(st.Size), abs, abs), nil
 	}
 
 	offset := a.Offset
@@ -103,15 +116,29 @@ func (t *readTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 
 	text, meta := formatLines(string(data), offset, limit, fs.MaxLineChars, a.Raw)
 	meta["path"] = abs
-	meta["size_bytes"] = st.Size()
+	meta["size_bytes"] = st.Size
+	meta["target"] = target.name
 
 	var header strings.Builder
-	fmt.Fprintf(&header, "%s（%s，共 %d 行）", abs, humanBytes(st.Size()), meta["total_lines"])
+	fmt.Fprintf(&header, "%s%s（%s，共 %d 行）", label(target), abs, humanBytes(st.Size), meta["total_lines"])
 	if meta["truncated_lines"] == true {
 		fmt.Fprintf(&header, "\n显示第 %v-%v 行；还有内容未显示，可继续用 offset=%v 读取",
 			meta["start_line"], meta["end_line"], meta["next_offset"])
 	}
 	return mcp.Text(header.String() + "\n\n" + text).WithStructured(meta), nil
+}
+
+// imageResult 把图片字节包装成 MCP 结果。本机与远端共用这一处，
+// 后续的压缩、视觉描述改造只需要改这里。
+func imageResult(prefix, path, mime string, data []byte, maxBytes int) *mcp.CallToolResult {
+	if maxBytes > 0 && len(data) > maxBytes {
+		return mcp.ToolError("%s图片 %s 有 %s，超过上限 %s", prefix, path,
+			humanBytes(int64(len(data))), humanBytes(int64(maxBytes)))
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{
+		mcp.TextContent(fmt.Sprintf("%s图片 %s（%s，%s）", prefix, path, mime, humanBytes(int64(len(data))))),
+		mcp.ImageContent(base64.StdEncoding.EncodeToString(data), mime),
+	}}
 }
 
 // formatLines 按行切片并可选加行号。
@@ -249,7 +276,7 @@ func (t *writeTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallToo
 	}
 	abs, err := t.d.Paths.CheckWrite(a.Path)
 	if err != nil {
-		t.d.Audit.Policy(cc.Principal, cc.SessionID, "write", "denied", "path-deny", a.Path, "", err.Error())
+		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "write", "local", "denied", "path-deny", a.Path, "", err.Error())
 		return mcp.ToolError("%s", err.Error()), nil
 	}
 	if max := t.d.Cfg.Tools.FS.MaxWriteBytes; max > 0 && len(a.Content) > max {

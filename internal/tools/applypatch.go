@@ -1,23 +1,33 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/noir017/runabout/internal/fleet"
 	"github.com/noir017/runabout/internal/mcp"
+	"github.com/noir017/runabout/internal/policy"
 )
 
 type applyPatchTool struct{ d *Deps }
 
 type applyPatchArgs struct {
+	Target string `json:"target"`
 	Patch  string `json:"patch"`
 	DryRun bool   `json:"dry_run"`
 }
 
 func (t *applyPatchTool) Definition() mcp.ToolDef {
+	targetDoc := ""
+	if t.d.fleetEnabled() {
+		targetDoc = "\n- 远端文件同样先全部取回、在本地算完补丁，全部通过后才逐个写回；" +
+			"写回是原地覆盖，inode 不变。"
+	}
 	return mcp.ToolDef{
 		Name:  "apply_patch",
 		Title: "按补丁修改文件",
@@ -44,11 +54,11 @@ func (t *applyPatchTool) Definition() mcp.ToolDef {
 - 需要重命名：在 Update File 下一行写 *** Move to: 新路径。
 - 改动前建议先 read 目标区域，确保上下文抄得准确。
 - dry_run=true 只校验补丁能不能套上，不实际写盘。
-- 全部文件要么一起成功、要么一起不动：任何一个文件套不上，整个补丁都不会落盘。`,
-		InputSchema: schema(map[string]any{
+- 全部文件要么一起成功、要么一起不动：任何一个文件套不上，整个补丁都不会落盘。` + targetDoc,
+		InputSchema: schema(t.d.withTarget(map[string]any{
 			"patch":   strProp("完整的补丁文本，包含 *** Begin Patch / *** End Patch"),
 			"dry_run": boolProp("只校验不写入"),
-		}, "patch"),
+		}), "patch"),
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: mcp.Ptr(true)},
 	}
 }
@@ -74,6 +84,11 @@ func (t *applyPatchTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.Ca
 	if strings.TrimSpace(a.Patch) == "" {
 		return mcp.ToolError("patch 不能为空"), nil
 	}
+	target, err := t.d.resolveTarget(a.Target)
+	if err != nil {
+		return mcp.ToolError("%s", err.Error()), nil
+	}
+	fsys, guard := t.d.fsFor(target)
 	ops, err := parsePatch(a.Patch)
 	if err != nil {
 		return mcp.ToolError("补丁格式有问题: %s", err.Error()), nil
@@ -82,51 +97,85 @@ func (t *applyPatchTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.Ca
 	// 第一阶段：全部算清楚，一个都不写。
 	plans := make([]plannedWrite, 0, len(ops))
 	for _, op := range ops {
-		plan, err := t.plan(cc, op)
+		plan, err := t.plan(cc, target, fsys, guard, op)
 		if err != nil {
-			return mcp.ToolError("处理 %s 时失败：%s\n\n（本次没有任何文件被改动）", op.path, err.Error()), nil
+			if isConnectError(err) {
+				return mcp.ToolError("%s", targetError(target.name, err)), nil
+			}
+			return mcp.ToolError("%s处理 %s 时失败：%s\n\n（本次没有任何文件被改动）",
+				label(target), op.path, err.Error()), nil
 		}
 		plans = append(plans, *plan)
 	}
 
 	if a.DryRun {
-		return mcp.Text("dry_run：补丁可以正常套用，未写入任何文件。\n\n" + summarize(plans)).
-			WithStructured(structuredPlans(plans, true)), nil
+		return mcp.Text(label(target) + "dry_run：补丁可以正常套用，未写入任何文件。\n\n" + summarize(plans)).
+			WithStructured(structuredPlans(target.name, plans, true)), nil
 	}
 
-	// 第二阶段：落盘。
-	for _, p := range plans {
-		if err := t.commit(p); err != nil {
-			return mcp.ToolError("写入 %s 失败：%v\n\n注意：本次补丁涉及多个文件，前面的文件可能已经写入，"+
-				"请用 read 或 git diff 确认当前状态", p.absPath, err), nil
+	// 第二阶段：落盘。远端多文件写到一半断线无法回滚，失败时列出已写入和未写入的文件。
+	written := make([]string, 0, len(plans))
+	for i, p := range plans {
+		if err := t.commit(cc.Ctx, fsys, p); err != nil {
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "%s写入 %s 失败：%v\n", label(target), p.absPath, err)
+			if isConnectError(err) {
+				sb.WriteString("\n" + connectHint() + "\n")
+			}
+			if len(written) > 0 {
+				sb.WriteString("\n已写入：\n")
+				for _, w := range written {
+					sb.WriteString("· " + w + "\n")
+				}
+			}
+			sb.WriteString("\n未写入：\n")
+			for _, rest := range plans[i:] {
+				sb.WriteString("· " + rest.absPath + "\n")
+			}
+			sb.WriteString("\n写回无法回滚；请用 read 或 git diff 确认当前状态")
+			return mcp.ToolError("%s", strings.TrimRight(sb.String(), "\n")), nil
 		}
+		written = append(written, p.absPath)
 	}
-	t.d.Log.Info("apply_patch 完成", "files", len(plans), "user", cc.Principal.Subject)
-	return mcp.Text(summarize(plans)).WithStructured(structuredPlans(plans, false)), nil
+	t.d.Log.Info("apply_patch 完成", "target", target.name, "files", len(plans), "user", cc.Principal.Subject)
+	return mcp.Text(label(target) + summarize(plans)).WithStructured(structuredPlans(target.name, plans, false)), nil
 }
 
-func (t *applyPatchTool) plan(cc *mcp.CallContext, op patchOp) (*plannedWrite, error) {
-	abs, err := t.d.Paths.CheckWrite(op.path)
+func (t *applyPatchTool) plan(cc *mcp.CallContext, target targetInfo, fsys fleet.FS, guard *policy.PathGuard, op patchOp) (*plannedWrite, error) {
+	abs, err := resolveWritePath(t.d, target, guard, op.path)
 	if err != nil {
-		t.d.Audit.Policy(cc.Principal, cc.SessionID, "apply_patch", "denied", "path-deny", op.path, "", err.Error())
+		t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "apply_patch", target.name, "denied", "path-deny", op.path, "", err.Error())
 		return nil, err
 	}
 	p := &plannedWrite{op: op, absPath: abs, mode: 0o644}
 	if op.moveTo != "" {
-		moveAbs, err := t.d.Paths.CheckWrite(op.moveTo)
+		moveAbs, err := resolveWritePath(t.d, target, guard, op.moveTo)
 		if err != nil {
 			return nil, err
 		}
 		p.absMove = moveAbs
 	}
 
-	st, statErr := os.Stat(abs)
-	p.existing = statErr == nil
+	st, statErr := fsys.Stat(cc.Ctx, abs)
+	switch {
+	case statErr == nil:
+		p.existing = true
+	case isConnectError(statErr):
+		return nil, statErr
+	case target.remote:
+		// 远端 stat 的退出码分不清"不存在"和"没权限"，按不存在处理；
+		// 后续读或写会给出真实错误。
+		p.existing = false
+	case errors.Is(statErr, os.ErrNotExist):
+		p.existing = false
+	default:
+		return nil, statErr
+	}
 	if p.existing {
-		if st.IsDir() {
+		if st.IsDir {
 			return nil, fmt.Errorf("%s 是目录", abs)
 		}
-		p.mode = st.Mode().Perm()
+		p.mode = st.Mode
 	}
 
 	switch op.kind {
@@ -142,7 +191,7 @@ func (t *applyPatchTool) plan(cc *mcp.CallContext, op patchOp) (*plannedWrite, e
 		if !p.existing {
 			return nil, fmt.Errorf("%s 不存在，无法删除", abs)
 		}
-		data, err := os.ReadFile(abs)
+		data, err := fsys.ReadFile(cc.Ctx, abs)
 		if err != nil {
 			return nil, err
 		}
@@ -152,11 +201,11 @@ func (t *applyPatchTool) plan(cc *mcp.CallContext, op patchOp) (*plannedWrite, e
 		if !p.existing {
 			return nil, fmt.Errorf("%s 不存在。新建文件请用 Add File 段落", abs)
 		}
-		if int64(t.d.Cfg.Tools.FS.MaxReadBytes) < st.Size() {
+		if int64(t.d.Cfg.Tools.FS.MaxReadBytes) < st.Size {
 			return nil, fmt.Errorf("%s 有 %s，超过 apply_patch 能处理的上限 %s",
-				abs, humanBytes(st.Size()), humanBytes(int64(t.d.Cfg.Tools.FS.MaxReadBytes)))
+				abs, humanBytes(st.Size), humanBytes(int64(t.d.Cfg.Tools.FS.MaxReadBytes)))
 		}
-		data, err := os.ReadFile(abs)
+		data, err := fsys.ReadFile(cc.Ctx, abs)
 		if err != nil {
 			return nil, err
 		}
@@ -182,28 +231,28 @@ func (t *applyPatchTool) plan(cc *mcp.CallContext, op patchOp) (*plannedWrite, e
 	return p, nil
 }
 
-func (t *applyPatchTool) commit(p plannedWrite) error {
+func (t *applyPatchTool) commit(ctx context.Context, fsys fleet.FS, p plannedWrite) error {
 	switch p.op.kind {
 	case kindDelete:
-		return os.Remove(p.absPath)
+		return fsys.Remove(ctx, p.absPath)
 	case kindAdd:
-		if err := os.MkdirAll(filepath.Dir(p.absPath), 0o755); err != nil {
+		if err := fsys.MkdirAll(ctx, filepath.Dir(p.absPath)); err != nil {
 			return err
 		}
-		return atomicWrite(p.absPath, []byte(p.content), p.mode)
+		return fsys.WriteFile(ctx, p.absPath, []byte(p.content), p.mode)
 	case kindUpdate:
 		target := p.absPath
 		if p.absMove != "" {
 			target = p.absMove
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := fsys.MkdirAll(ctx, filepath.Dir(target)); err != nil {
 				return err
 			}
 		}
-		if err := atomicWrite(target, []byte(p.content), p.mode); err != nil {
+		if err := fsys.WriteFile(ctx, target, []byte(p.content), p.mode); err != nil {
 			return err
 		}
 		if p.absMove != "" && p.absMove != p.absPath {
-			return os.Remove(p.absPath)
+			return fsys.Remove(ctx, p.absPath)
 		}
 	}
 	return nil
@@ -236,7 +285,7 @@ func summarize(plans []plannedWrite) string {
 	return sb.String()
 }
 
-func structuredPlans(plans []plannedWrite, dryRun bool) map[string]any {
+func structuredPlans(target string, plans []plannedWrite, dryRun bool) map[string]any {
 	items := make([]map[string]any, 0, len(plans))
 	for _, p := range plans {
 		item := map[string]any{
@@ -251,5 +300,5 @@ func structuredPlans(plans []plannedWrite, dryRun bool) map[string]any {
 		}
 		items = append(items, item)
 	}
-	return map[string]any{"dry_run": dryRun, "files": items}
+	return map[string]any{"dry_run": dryRun, "target": target, "files": items}
 }

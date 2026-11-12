@@ -14,7 +14,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -585,5 +587,165 @@ func TestSessionTermination(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("DELETE 应返回 204，实际 %d", resp.StatusCode)
+	}
+}
+
+// fleetHarness 配两台假机器：web1 直连，nas 需审批。ssh_command 指向桩脚本，
+// 桩脚本把远端命令放在本机执行，所以 inode 这类语义和真远端一致。
+func fleetHarness(t *testing.T) *harness {
+	t.Helper()
+	stub := filepath.Join(t.TempDir(), "stub-ssh")
+	script := "#!/bin/sh\nfor last; do :; done\nexec sh -c \"$last\"\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return newHarnessWith(t, func(cfg *config.Config) {
+		cfg.Fleet = config.Fleet{
+			SSHCommand:   []string{stub},
+			ProbeTimeout: 3 * time.Second,
+			Hosts: []config.FleetHost{
+				{Name: "web1", Desc: "测试机", SSH: "web1"},
+				{Name: "nas", Desc: "存储", Approval: true},
+			},
+		}
+	})
+}
+
+func toolDef(t *testing.T, list map[string]any, name string) map[string]any {
+	t.Helper()
+	for _, tl := range list["tools"].([]any) {
+		td := tl.(map[string]any)
+		if td["name"] == name {
+			return td
+		}
+	}
+	t.Fatalf("工具列表里没有 %s", name)
+	return nil
+}
+
+// TestFleetOverMCP 走真实 HTTP 链路验证 target 参数、远端文件与 servers。
+func TestFleetOverMCP(t *testing.T) {
+	h := fleetHarness(t)
+	h.authorize()
+	h.rpc("initialize", map[string]any{"protocolVersion": "2025-06-18",
+		"clientInfo": map[string]any{"name": "t", "version": "1"}})
+
+	list := h.rpc("tools/list", nil)
+	shell := toolDef(t, list, "shell")
+	props := shell["inputSchema"].(map[string]any)["properties"].(map[string]any)
+	tp, ok := props["target"].(map[string]any)
+	if !ok {
+		t.Fatal("配置机群后 shell 应带 target 参数")
+	}
+	if _, bad := tp["anyOf"]; bad {
+		t.Error("target 不能用 anyOf")
+	}
+	if _, bad := tp["oneOf"]; bad {
+		t.Error("target 不能用 oneOf")
+	}
+	enum := tp["enum"].([]any)
+	if len(enum) != 3 || enum[0] != "local" || enum[1] != "web1" || enum[2] != "nas" {
+		t.Errorf("target enum 不对: %v", enum)
+	}
+
+	out, isErr := h.callTool("shell", map[string]any{"target": "web1", "command": "echo remote-ok"})
+	if isErr || !strings.Contains(out, "[web1] exit=0") || !strings.Contains(out, "remote-ok") {
+		t.Fatalf("远端 shell 失败: %s", out)
+	}
+
+	remoteFile := filepath.Join(h.workdir, "remote.txt")
+	if err := os.WriteFile(remoteFile, []byte("hello\nworld\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	out, isErr = h.callTool("read", map[string]any{"target": "web1", "path": remoteFile})
+	if isErr || !strings.Contains(out, "[web1]") || !strings.Contains(out, "hello") {
+		t.Fatalf("远端 read 失败: %s", out)
+	}
+
+	before, err := os.Stat(remoteFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inoBefore := before.Sys().(*syscall.Stat_t).Ino
+	patch := "*** Begin Patch\n*** Update File: " + remoteFile + "\n@@\n-world\n+世界\n*** End Patch"
+	out, isErr = h.callTool("apply_patch", map[string]any{"target": "web1", "patch": patch})
+	if isErr {
+		t.Fatalf("远端 apply_patch 失败: %s", out)
+	}
+	after, err := os.Stat(remoteFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ino := after.Sys().(*syscall.Stat_t).Ino; ino != inoBefore {
+		t.Errorf("远端写回后 inode 变了：%d -> %d", inoBefore, ino)
+	}
+	data, err := os.ReadFile(remoteFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "世界") {
+		t.Errorf("补丁没生效: %q", data)
+	}
+
+	out, isErr = h.callTool("servers", nil)
+	if isErr {
+		t.Fatalf("servers 失败: %s", out)
+	}
+	if !strings.Contains(out, "[web1] 在线") || !strings.Contains(out, "[nas] 需审批") {
+		t.Errorf("总览状态不对: %s", out)
+	}
+	out, isErr = h.callTool("servers", map[string]any{"target": "web1"})
+	if isErr || !strings.Contains(out, "## 内存") {
+		t.Errorf("单台详情不对: %s", out)
+	}
+}
+
+// TestFleetConfirmTokenCrossTarget 锁住"本机令牌不能拿到别的机器上用"。
+func TestFleetConfirmTokenCrossTarget(t *testing.T) {
+	h := fleetHarness(t)
+	h.authorize()
+	h.rpc("initialize", map[string]any{"protocolVersion": "2025-06-18",
+		"clientInfo": map[string]any{"name": "t", "version": "1"}})
+
+	victim := filepath.Join(h.workdir, "victim.txt")
+	if err := os.WriteFile(victim, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, isErr := h.callTool("shell", map[string]any{"target": "local", "command": "rm -rf *"})
+	if !isErr {
+		t.Fatalf("应先要求确认: %s", out)
+	}
+	m := regexp.MustCompile(`confirm_token = (\S+)`).FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("没有下发令牌: %s", out)
+	}
+	out, isErr = h.callTool("shell", map[string]any{
+		"target": "web1", "command": "rm -rf *", "confirm_token": m[1],
+	})
+	if !isErr || !strings.Contains(out, "不匹配") {
+		t.Errorf("本机令牌用到 web1 上应失败: %s", out)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Error("被拦下的命令绝不能执行")
+	}
+}
+
+// TestReadOnlyAnnotationsOverMCP 钉住只读工具的 annotations。
+func TestReadOnlyAnnotationsOverMCP(t *testing.T) {
+	h := newHarness(t)
+	h.authorize()
+	h.rpc("initialize", map[string]any{"protocolVersion": "2025-06-18",
+		"clientInfo": map[string]any{"name": "t", "version": "1"}})
+	list := h.rpc("tools/list", nil)
+	for _, name := range []string{"read", "search", "glob", "servers"} {
+		td := toolDef(t, list, name)
+		ann, ok := td["annotations"].(map[string]any)
+		if !ok {
+			t.Errorf("%s 缺少 annotations", name)
+			continue
+		}
+		if ann["readOnlyHint"] != true || ann["idempotentHint"] != true || ann["destructiveHint"] != false {
+			t.Errorf("%s 的 annotations 不对: %v", name, ann)
+		}
 	}
 }
