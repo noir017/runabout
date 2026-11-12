@@ -123,7 +123,9 @@ e2e 测试里专门验了这一条。
 - 长边超过 `fs.image_max_edge`（默认 2000）或体积超过 `fs.max_image_bytes` 时，等比缩小并编码为 JPEG（质量 85）；
   仍然超限就先降质量，到 40 后再按超出比例缩尺寸。
 - 没超限的图原样返回，不重新编码，避免无谓的画质损失。
-- 解码前先用 `image.DecodeConfig` 检查像素数（默认上限 30MP），挡住"小文件解出巨图"的解压炸弹。
+- 解码前先用 `image.DecodeConfig` 检查像素数（`fs.max_image_pixels`，默认 30MP），挡住"小文件解出巨图"的解压炸弹。
+- 是不是图片看文件头 magic，不看扩展名：改名成 `.png` 的大文本仍按 `max_read_bytes` 拒绝，不会整个读进内存。
+- 同时处理的图片张数由 `fs.max_image_concurrency` 控制（默认 2），避免多个大图一起解码打爆内存。
 - 支持 png/jpeg/gif/webp/bmp；动图 GIF 只取第一帧。透明区域铺白底，因为 JPEG 没有 alpha。
 - 返回文字同时给出原尺寸和处理后尺寸，模型能知道图片被缩过。
 
@@ -138,6 +140,7 @@ OpenAI 兼容的 `/chat/completions` 接口：启用后 `read` 除了 image 块�
 - `base_url` 与 `model` 都非空才启用，默认关闭。
 - API key 只从 `api_key_env` 指定的环境变量读取，配置文件里不出现密钥。
 - 描述用压缩后的图片，省 token；调用失败只在结果里附一句原因，图片照常返回。
+- 错误文本不回显上游响应体；BaseURL 里的 userinfo、query 和 API key 会先抹掉再返回。
 - 这是同步调用，超时由 `vision.timeout` 控制（默认 30s），不要设得比客户端工具超时还长。
 
 ### apply_patch 为什么用 V4A 格式
@@ -165,9 +168,13 @@ readOnlyHint / idempotentHint、destructiveHint=false，让模型有一个不弹
 它不执行任意命令。`internal/policy/readonly.go` 复用 shell 的 AST 解析，只放行白名单里的命令：
 
 - 基础命令：ls、cat、head、tail、grep、rg、find、df、du、free、ps、uptime、ss、ip、journalctl、systemctl、docker 等。
+- 选项也走允许列表：长选项按完整名字精确匹配（`--out=` 不会被当成 `--output`），短选项按字母判定；
+  find 的谓词单独按允许列表判定。不在列表里的选项一律拒绝。
 - 子命令级判定：`systemctl` 只认 status/is-active/list-units 一类；`docker` 按"对象 + 动词"白名单
   （ps/logs/inspect/images 等）；`ip` 只认 show/list/get；`find` 拒绝 -exec/-delete；`journalctl` 拒绝
   --vacuum/--rotate；`sort` 拒绝 -o；`rg` 拒绝 --pre。
+- 命令名带 `/`（如 `/bin/ls`）、带变量赋值前缀（`PATH=... ls`、`LD_PRELOAD=... ls`、`env PATH=... ls`）
+  一律拒绝；uniq 已移出白名单，因为它的第二个位置参数就是输出文件。
 - 管道、`&&`、`;` 都允许，但每一段都要过白名单。
 - 写重定向（>、>>、&>）、命令替换、进程替换、含变量且无法展开的参数、解析不出来的命令名，一律拒绝。
 - 判定失败时返回具体原因，并提示改用 shell。

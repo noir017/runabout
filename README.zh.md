@@ -89,11 +89,11 @@ fleet:
 
 远端文件写回是原地覆盖（`cat > 文件`），inode 不变；多文件补丁写到一半断线无法回滚，结果里会列出已写入和未写入的文件。远端路径黑名单按字面匹配，不解析符号链接。
 
-`read` 读图时会在长边超过 `image_max_edge`（默认 2000px）或体积超过 `max_image_bytes` 时自动缩小并转成 JPEG，返回文字里同时给出原尺寸和处理后尺寸。图片的原始文件上限是 `max_image_source_bytes`（默认 32MB），不套用 `max_read_bytes`。
+`read` 读图时会在长边超过 `image_max_edge`（默认 2000px）或体积超过 `max_image_bytes` 时自动缩小并转成 JPEG，返回文字里同时给出原尺寸和处理后尺寸。图片按文件头 magic 判定，不看扩展名；原始文件上限是 `max_image_source_bytes`（默认 32MB），不套用 `max_read_bytes`；`max_image_pixels` 和 `max_image_concurrency` 分别限制解码像素数和并发张数。
 
 可选开启视觉描述（`tools.fs.vision`，默认关闭）：客户端看不到 MCP 图片块时，`read` 会再附一段文字说明。接口需兼容 OpenAI 的 `/chat/completions`，API key 只从 `api_key_env` 指定的环境变量读取。
 
-可选开启只读查询工具 `query`（`tools.query.enabled`，默认关闭）：它只执行白名单内的只读命令（ls、cat、grep、journalctl、systemctl status、docker ps 等），不会触发确认；无法证明只读的命令会被拒绝并提示改用 `shell`。
+可选开启只读查询工具 `query`（`tools.query.enabled`，默认关闭）：它只执行白名单内的只读命令（ls、cat、grep、journalctl、systemctl status、docker ps 等），不会触发确认；选项、子命令和 find 谓词都按允许列表校验，无法证明只读的命令会被拒绝并提示改用 `shell`。
 
 ## 安全模型
 

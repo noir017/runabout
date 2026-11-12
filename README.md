@@ -87,11 +87,11 @@ Hosts marked `approval: true` are probed only when `approval_check` exits 0; oth
 
 Remote file writes overwrite in place (`cat > file`) so the inode does not change. Multi-file patches cannot be rolled back if the connection drops; the result lists what was written and what was not. Remote path deny rules match literally and do not resolve symlinks.
 
-Images returned by `read` are downscaled and re-encoded as JPEG when their long edge exceeds `image_max_edge` (2000px by default) or their size exceeds `max_image_bytes`; the original and processed dimensions are both reported. The original file limit for images is `max_image_source_bytes` (32MB by default), separate from `max_read_bytes`.
+Images returned by `read` are downscaled and re-encoded as JPEG when their long edge exceeds `image_max_edge` (2000px by default) or their size exceeds `max_image_bytes`; the original and processed dimensions are both reported. Image detection uses file magic, not the extension. The original file limit for images is `max_image_source_bytes` (32MB by default), separate from `max_read_bytes`; `max_image_pixels` and `max_image_concurrency` bound decoding memory and parallelism.
 
 An optional vision model (`tools.fs.vision`, off by default) can append a text description of each image, for clients that do not pass MCP image blocks to the model. It calls an OpenAI-compatible `/chat/completions` endpoint; the API key is read from the environment variable named by `api_key_env`.
 
-An optional `query` tool (`tools.query.enabled`, off by default) runs a whitelist of read-only commands (ls, cat, grep, journalctl, systemctl status, docker ps, …) without triggering confirmations. Anything that cannot be proven read-only is rejected with a hint to use `shell`.
+An optional `query` tool (`tools.query.enabled`, off by default) runs a whitelist of read-only commands (ls, cat, grep, journalctl, systemctl status, docker ps, …) without triggering confirmations. Options, subcommands and find predicates are checked against explicit allowlists; anything that cannot be proven read-only is rejected with a hint to use `shell`.
 
 ## Security model
 
