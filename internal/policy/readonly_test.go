@@ -8,6 +8,9 @@ func TestReadOnlyGuardRejectsSecrets(t *testing.T) {
 	if err := g.CheckReadOnly("cat ~/.ssh/id_rsa"); err == nil {
 		t.Error("读取私钥应被拒绝")
 	}
+	if err := g.CheckReadOnly("grep root /etc/shadow"); err == nil {
+		t.Error("凭据类路径即使不是 cat 也应被拒绝")
+	}
 	if err := g.CheckReadOnly("systemctl status nginx"); err != nil {
 		t.Errorf("普通只读命令不应受影响: %v", err)
 	}

@@ -32,6 +32,15 @@ func (g *ShellGuard) CheckReadOnly(command string) error {
 	if err := CheckReadOnly(command); err != nil {
 		return err
 	}
+	script := ParseShell(command, g.home)
+	for _, c := range script.Cmds {
+		targets, _ := c.Targets()
+		for _, t := range targets {
+			if hit, ok := g.matchSecret(t); ok {
+				return fmt.Errorf("命令涉及凭据类路径 %s（命中 %s），只读查询不允许", t, hit)
+			}
+		}
+	}
 	if v := g.Inspect(command); v.Action != ActionAllow {
 		return fmt.Errorf("命令命中安全规则，需要确认或禁止：%s", v.Explain())
 	}
