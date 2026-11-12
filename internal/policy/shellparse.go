@@ -15,6 +15,9 @@ type Cmd struct {
 	Unresolved []bool
 	Redirects  []Redir
 	Text       string
+	// Assigns 是命令前缀里的变量赋值（PATH=... ls 里的 PATH）。
+	// 它们不在 Argv 里，但会改变被调命令的行为，只读判定必须能看到。
+	Assigns []string
 	// Depth 表示嵌套层级：0 为顶层，1 表示来自 bash -c "..." 之类的内层脚本。
 	Depth int
 }
@@ -130,6 +133,11 @@ func flattenPipe(b *syntax.BinaryCmd, inner map[*syntax.BinaryCmd]bool) []*synta
 func buildCmd(st *syntax.Stmt, src string, depth int, home string) *Cmd {
 	c := &Cmd{Depth: depth, Text: nodeText(st, src)}
 	if ce, ok := st.Cmd.(*syntax.CallExpr); ok {
+		for _, a := range ce.Assigns {
+			if a.Name != nil {
+				c.Assigns = append(c.Assigns, a.Name.Value)
+			}
+		}
 		for _, w := range ce.Args {
 			lit, ok := wordLiteral(w, home)
 			c.Argv = append(c.Argv, lit)

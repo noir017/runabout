@@ -36,6 +36,7 @@ func TestReadOnlyAllows(t *testing.T) {
 		"ip -br link",
 		"ip route get 1.1.1.1",
 		"ip -4 neigh",
+		"ip -timestamp addr show",
 		"journalctl -u nginx -n 200 --no-pager",
 		"systemctl status nginx",
 		"systemctl is-active nginx",
@@ -65,7 +66,7 @@ func TestReadOnlyAllows(t *testing.T) {
 		"ls -la | grep log | head",
 		"sudo systemctl status nginx",
 		"timeout 5 ls /tmp",
-		"env LC_ALL=C ls /tmp",
+		"env ls /tmp",
 		"ls && df -h",
 		"cat /etc/hosts; df -h",
 	}
@@ -131,6 +132,30 @@ func TestReadOnlyRejects(t *testing.T) {
 		"date 010100002026",
 		"cat <<EOF\n$(rm -rf /tmp/x)\nEOF",
 		"> /tmp/out",
+		// 选项缩写/前缀不能绕过长选项白名单。
+		"sort --out=/tmp/x file",
+		"sort --output=/tmp/x file",
+		"sort --temporary-directory=/etc /etc/hosts",
+		"sort -T /etc /etc/hosts",
+		"journalctl --vacuum-t 1d",
+		"journalctl --rot",
+		"journalctl --se=2026-01-01",
+		"journalctl --fil=/tmp/x",
+		"ss --kil dst 1.2.3.4",
+		"file --comp magic",
+		"file --compile magic",
+		// uniq 的第二个位置参数是输出文件。
+		"uniq in.txt pwned.txt",
+		// 这些命令本身不带写操作，但能通过选项或路径前缀绕过判定。
+		"ss -D",
+		"/bin/ls /tmp",
+		"./ls /tmp",
+		"PATH=/tmp ls",
+		"LD_PRELOAD=/tmp/x.so ls",
+		"env PATH=/tmp ls",
+		"env LD_PRELOAD=/tmp/x.so ls",
+		"find . -name x -fprintf /tmp/out %p",
+		"find . -fls /tmp/out",
 	}
 	for _, cmd := range denied {
 		if err := CheckReadOnly(cmd); err == nil {
