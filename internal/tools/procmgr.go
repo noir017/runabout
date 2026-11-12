@@ -2,12 +2,12 @@ package tools
 
 import (
 	"fmt"
-	"os/exec"
 	"sort"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/noir017/runabout/internal/fleet"
 	"github.com/noir017/runabout/internal/idgen"
 )
 
@@ -17,12 +17,13 @@ import (
 // 所以 shell 支持丢到后台，再用 shell_output / shell_kill 观察和收尾。
 type Proc struct {
 	ID      string
+	Target  string
 	Label   string
 	Command string
 	Workdir string
 	Started time.Time
 
-	cmd  *exec.Cmd
+	proc fleet.Process
 	out  *capWriter
 	done chan struct{}
 
@@ -155,15 +156,10 @@ func (p *Proc) TakeNew() string {
 
 // Signal 给整个进程组发信号：后台任务常常自己再拉子进程，只杀父进程会留孤儿。
 func (p *Proc) Signal(sig syscall.Signal) error {
-	if p.cmd == nil || p.cmd.Process == nil {
+	if p.proc == nil {
 		return fmt.Errorf("进程尚未启动")
 	}
-	pgid := -p.cmd.Process.Pid
-	if err := syscall.Kill(pgid, sig); err != nil {
-		// 进程组可能已经不存在，退回到单进程。
-		return p.cmd.Process.Signal(sig)
-	}
-	return nil
+	return p.proc.Signal(sig)
 }
 
 // Wait 等待进程结束或超时。

@@ -137,6 +137,28 @@ func (g *PathGuard) CheckWrite(path string) (string, error) {
 	return abs, nil
 }
 
+// CheckReadLiteral 按字面匹配远端路径。远端无法解析符号链接，
+// 也不展开 ~（远端用户的家目录不一定是本机这个），只做清理后比对。
+func (g *PathGuard) CheckReadLiteral(path string) (string, error) {
+	clean := filepath.Clean(path)
+	if pat, hit := matchPath(g.readDeny, clean, path); hit {
+		return "", &DeniedError{Path: clean, Pattern: pat, Mode: "read"}
+	}
+	return clean, nil
+}
+
+// CheckWriteLiteral 是 CheckWrite 的远端版本。
+func (g *PathGuard) CheckWriteLiteral(path string) (string, error) {
+	clean := filepath.Clean(path)
+	if pat, hit := matchPath(g.writeDeny, clean, path); hit {
+		return "", &DeniedError{Path: clean, Pattern: pat, Mode: "write"}
+	}
+	if pat, hit := matchPath(g.readDeny, clean, path); hit {
+		return "", &DeniedError{Path: clean, Pattern: pat, Mode: "write"}
+	}
+	return clean, nil
+}
+
 // matchPath 同时用解析后的绝对路径和原始输入去匹配，避免软链接解析把
 // ~/.ssh/id_rsa 变成别的真实路径后漏过规则。
 func matchPath(patterns []string, abs, original string) (string, bool) {

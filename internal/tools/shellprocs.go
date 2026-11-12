@@ -46,10 +46,10 @@ func (t *shellListTool) Call(cc *mcp.CallContext, _ json.RawMessage) (*mcp.CallT
 		if label != "" {
 			label = " [" + label + "]"
 		}
-		fmt.Fprintf(&sb, "\n· %s%s  %s  %s  已捕获 %d 字节\n  cwd=%s\n  cmd=%s",
-			p.ID, label, state, elapsed.Round(time.Second), p.out.Total(), p.Workdir, truncate(p.Command, 200))
+		fmt.Fprintf(&sb, "\n· %s%s  [%s]  %s  %s  已捕获 %d 字节\n  cwd=%s\n  cmd=%s",
+			p.ID, label, p.Target, state, elapsed.Round(time.Second), p.out.Total(), p.Workdir, truncate(p.Command, 200))
 		item := map[string]any{
-			"process_id": p.ID, "label": p.Label, "state": state, "running": running,
+			"process_id": p.ID, "target": p.Target, "label": p.Label, "state": state, "running": running,
 			"command": p.Command, "workdir": p.Workdir,
 			"started_at": p.Started.Format(time.RFC3339), "output_bytes": p.out.Total(),
 		}
@@ -118,9 +118,9 @@ func (t *shellOutputTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.C
 	running, code, runErr, _ := p.Status()
 	var sb strings.Builder
 	if running {
-		fmt.Fprintf(&sb, "进程 %s 仍在运行（已 %s）\n", p.ID, time.Since(p.Started).Round(time.Second))
+		fmt.Fprintf(&sb, "[%s] 进程 %s 仍在运行（已 %s）\n", p.Target, p.ID, time.Since(p.Started).Round(time.Second))
 	} else {
-		fmt.Fprintf(&sb, "进程 %s 已结束，exit_code=%d\n", p.ID, code)
+		fmt.Fprintf(&sb, "[%s] 进程 %s 已结束，exit_code=%d\n", p.Target, p.ID, code)
 		if runErr != nil {
 			fmt.Fprintf(&sb, "错误: %v\n", runErr)
 		}
@@ -129,7 +129,7 @@ func (t *shellOutputTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.C
 	sb.WriteString(section("output", out))
 
 	return mcp.Text(sb.String()).WithStructured(map[string]any{
-		"process_id": p.ID, "running": running, "exit_code": code,
+		"process_id": p.ID, "target": p.Target, "running": running, "exit_code": code,
 		"output": out, "total_bytes": p.out.Total(),
 	}), nil
 }
@@ -196,7 +196,7 @@ func (t *shellKillTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.Cal
 		return mcp.ToolError("发送信号失败: %v", err), nil
 	}
 	stopped := p.Wait(3 * time.Second)
-	t.d.Audit.Policy(cc.Principal, cc.SessionID, "shell_kill", "signal", "",
+	t.d.Audit.PolicyTarget(cc.Principal, cc.SessionID, "shell_kill", p.Target, "signal", "",
 		p.Command, p.Workdir, "SIG"+name)
 
 	msg := fmt.Sprintf("已向进程 %s 发送 SIG%s。", p.ID, name)

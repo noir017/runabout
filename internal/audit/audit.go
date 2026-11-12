@@ -26,6 +26,7 @@ type Record struct {
 	AuthMode string          `json:"auth,omitempty"`
 	Session  string          `json:"session,omitempty"`
 	Tool     string          `json:"tool,omitempty"`
+	Target   string          `json:"target,omitempty"`
 	Args     json.RawMessage `json:"args,omitempty"`
 	ArgsLen  int             `json:"args_len,omitempty"`
 	Decision string          `json:"decision,omitempty"`
@@ -98,7 +99,7 @@ func (l *Logger) ToolCall(p mcp.Principal, session, tool string, args json.RawMe
 	isError bool, errMsg string, dur time.Duration) {
 	r := Record{
 		Event: "tool_call", User: p.Subject, ClientID: p.ClientID, AuthMode: p.Method,
-		Session: session, Tool: tool, ArgsLen: len(args),
+		Session: session, Tool: tool, Target: targetFromArgs(args), ArgsLen: len(args),
 		IsError: isError, Message: errMsg, DurMS: dur.Milliseconds(),
 	}
 	if l.cfg.LogArgs && len(args) > 0 {
@@ -113,13 +114,30 @@ func (l *Logger) ToolCall(p mcp.Principal, session, tool string, args json.RawMe
 
 // Policy 记录一次策略判定（拒绝、要求确认、确认通过）。
 func (l *Logger) Policy(p mcp.Principal, session, tool, decision, ruleID, command, workdir, msg string) {
+	l.PolicyTarget(p, session, tool, "", decision, ruleID, command, workdir, msg)
+}
+
+// PolicyTarget 是带目标机器的策略判定，机群模式下用。
+func (l *Logger) PolicyTarget(p mcp.Principal, session, tool, target, decision, ruleID, command, workdir, msg string) {
 	l.Write(Record{
 		Event: "policy", User: p.Subject, ClientID: p.ClientID, AuthMode: p.Method,
-		Session: session, Tool: tool, Decision: decision, RuleID: ruleID,
+		Session: session, Tool: tool, Target: target, Decision: decision, RuleID: ruleID,
 		Command: command, Workdir: workdir, Message: msg,
 	})
-	l.log.Warn("策略判定", "tool", tool, "decision", decision, "rule", ruleID,
+	l.log.Warn("策略判定", "tool", tool, "target", target, "decision", decision, "rule", ruleID,
 		"user", p.Subject, "command", truncate(command, 200))
+}
+
+// targetFromArgs 从工具参数里取 target，单机模式没有这个字段时返回空。
+func targetFromArgs(args json.RawMessage) string {
+	var meta struct {
+		Target string `json:"target"`
+	}
+	if len(args) == 0 {
+		return ""
+	}
+	_ = json.Unmarshal(args, &meta)
+	return meta.Target
 }
 
 // Auth 记录鉴权相关事件（登录成功/失败、发令牌、动态注册）。

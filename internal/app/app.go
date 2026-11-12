@@ -16,6 +16,7 @@ import (
 	"github.com/noir017/runabout/internal/audit"
 	"github.com/noir017/runabout/internal/auth"
 	"github.com/noir017/runabout/internal/config"
+	"github.com/noir017/runabout/internal/fleet"
 	"github.com/noir017/runabout/internal/mcp"
 	"github.com/noir017/runabout/internal/policy"
 	"github.com/noir017/runabout/internal/tools"
@@ -24,20 +25,40 @@ import (
 // Version 由构建时通过 -ldflags 注入。
 var Version = "dev"
 
-const serverInstructions = `这是一台 Linux 服务器上的基础工具集，你可以用它直接操作这台机器。
+const fleetInstructions = `你连着用户的一组服务器，机器列表见各工具的 target 参数，实时状态用 servers 查。
+
+用户问到任何机器的状态、服务、日志、配置、网络、磁盘时：先调工具拿到真实数据再回答，
+不要只给命令让用户自己去跑。不知道在哪台机器上：先调 servers。
+
+标了【需审批】的机器，第一次连接会给用户手机发授权申请并等待；超时就告诉用户去批准，批准后原样重试。
+用户拒绝了就停下来问用户，不要换办法绕过。
+
+危险命令会被拦下并返回 confirm_token：先向用户说明后果，用户同意后再带上 token 重发。
+
+文件工具也有 target，默认 local（runabout 所在容器）。改远端文件优先用 apply_patch，
+它按上下文定位，不会覆盖没读过的内容。`
+
+const singleInstructions = `这是一台 Linux 服务器上的基础工具集，你可以用它直接操作这台机器。
 
 工具分工：
 - shell：执行任意 bash 命令。长任务用 run_in_background=true，再配合 shell_output / shell_kill。
-- read / write：读写文件。read 默认带行号输出。
-- apply_patch：修改已有文件的首选方式，靠上下文定位，不会覆盖没读过的内容。
-- search：按内容搜正则（相当于 rg）。glob：按文件名模式找文件。list_dir：看目录结构。
+- read / apply_patch：读文件和改文件。read 默认带行号，apply_patch 靠上下文定位。
+- search：按内容搜正则。glob：按文件名模式找文件。
+- servers：查看这台机器的负载、内存、磁盘、容器和失败的 systemd 单元。
 
-建议的工作方式：先用 list_dir / glob / search 摸清情况，用 read 确认要改的具体内容，
+建议的工作方式：先用 glob / search 摸清情况，用 read 确认要改的内容，
 再用 apply_patch 落改动，最后用 shell 跑测试或重启服务验证。
 
 关于安全拦截：绝大多数命令直接执行。少数破坏性操作会被拦下并返回 confirm_token，
 这时应当先向用户说明这条命令会做什么、有什么后果，得到同意后再带 token 重发。
 不要在用户没表态的情况下自己确认。`
+
+func serverInstructions(fleetEnabled bool) string {
+	if fleetEnabled {
+		return fleetInstructions
+	}
+	return singleInstructions
+}
 
 // Built 是装配好的服务：一个 http.Handler 加上关停时要做的清理。
 type Built struct {
@@ -77,12 +98,13 @@ func Build(cfg *config.Config, log *slog.Logger) (*Built, error) {
 		Confirm: policy.NewConfirmStore(cfg.Policy.ConfirmTTL),
 		Audit:   aud,
 		Procs:   tools.NewProcManager(cfg.Tools.Shell.MaxBackground),
+		Fleet:   fleet.New(cfg.Fleet, cfg.Tools.Shell.Path, cfg.Tools.Shell.Env),
 		Log:     log,
 	}
 
 	mcpSrv := mcp.NewServer(mcp.Implementation{
 		Name: "runabout", Title: "服务器基础工具集", Version: Version,
-	}, serverInstructions, log)
+	}, serverInstructions(len(cfg.Fleet.Hosts) > 0), log)
 	mcpSrv.SetAuditor(aud)
 	mcpSrv.Register(tools.All(deps)...)
 
