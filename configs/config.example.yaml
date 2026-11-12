@@ -87,7 +87,13 @@ tools:
     max_line_chars: 2000
     default_lines: 2000
     max_write_bytes: 8388608
+    # 图片处理后的体积上限；超过就降质量、再缩尺寸。
     max_image_bytes: 4194304
+    # 图片原始文件大小上限。图片不套用 max_read_bytes，
+    # 否则几 MB 的截图在压缩前就会被拒。
+    max_image_source_bytes: 33554432
+    # 读图时自动缩放的长边上限（像素）。
+    image_max_edge: 2000
 
   search:
     # 有 rg 就用 rg（快且尊重 .gitignore），没有则回退内置实现。

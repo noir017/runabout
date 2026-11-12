@@ -22,6 +22,9 @@ type FileInfo struct {
 type FS interface {
 	Stat(ctx context.Context, path string) (FileInfo, error)
 	ReadFile(ctx context.Context, path string) ([]byte, error)
+	// ReadHead 只读文件开头 n 字节，用来嗅探图片 magic，避免为判断类型
+	// 把整个大文件拉回来。
+	ReadHead(ctx context.Context, path string, n int) ([]byte, error)
 	// WriteFile 覆盖写入。远端必须原地覆盖（cat > 文件），保住 inode；
 	// mode 只在新建文件时对本地实现有意义。
 	WriteFile(ctx context.Context, path string, data []byte, mode os.FileMode) error
@@ -42,6 +45,23 @@ func (LocalFS) Stat(_ context.Context, path string) (FileInfo, error) {
 
 func (LocalFS) ReadFile(_ context.Context, path string) ([]byte, error) {
 	return os.ReadFile(path)
+}
+
+func (LocalFS) ReadHead(_ context.Context, path string, n int) ([]byte, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, n)
+	read, err := f.Read(buf)
+	if err != nil && read == 0 {
+		return nil, err
+	}
+	return buf[:read], nil
 }
 
 func (LocalFS) WriteFile(_ context.Context, path string, data []byte, mode os.FileMode) error {
@@ -145,6 +165,20 @@ func (r *RemoteFS) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	}
 	if res.Truncated || len(res.Stdout) > limit {
 		return nil, fmt.Errorf("文件超过 %d 字节", limit)
+	}
+	return []byte(res.Stdout), nil
+}
+
+func (r *RemoteFS) ReadHead(ctx context.Context, path string, n int) ([]byte, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	res, err := r.run(ctx, fmt.Sprintf("head -c %d -- %s", n, QuotePath(path)), "", n)
+	if err != nil {
+		return nil, err
+	}
+	if res.ExitCode != 0 {
+		return nil, commandError(res)
 	}
 	return []byte(res.Stdout), nil
 }

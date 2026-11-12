@@ -141,7 +141,13 @@ type FSCfg struct {
 	MaxLineChars  int `yaml:"max_line_chars"`
 	DefaultLines  int `yaml:"default_lines"`
 	MaxWriteBytes int `yaml:"max_write_bytes"`
+	// MaxImageBytes 是处理后图片的体积上限，超过会降质量或继续缩小。
 	MaxImageBytes int `yaml:"max_image_bytes"`
+	// MaxImageSourceBytes 是图片原始文件的大小上限。图片不套用 max_read_bytes，
+	// 否则一张几 MB 的截图会在压缩前就被拒绝。
+	MaxImageSourceBytes int `yaml:"max_image_source_bytes"`
+	// ImageMaxEdge 是读图时自动缩放的长边上限（像素）。
+	ImageMaxEdge int `yaml:"image_max_edge"`
 }
 
 type SearchCfg struct {
@@ -220,11 +226,13 @@ func Default() *Config {
 				MaxBackground:  16,
 			},
 			FS: FSCfg{
-				MaxReadBytes:  4 << 20,
-				MaxLineChars:  2000,
-				DefaultLines:  2000,
-				MaxWriteBytes: 8 << 20,
-				MaxImageBytes: 4 << 20,
+				MaxReadBytes:        4 << 20,
+				MaxLineChars:        2000,
+				DefaultLines:        2000,
+				MaxWriteBytes:       8 << 20,
+				MaxImageBytes:       4 << 20,
+				MaxImageSourceBytes: 32 << 20,
+				ImageMaxEdge:        2000,
 			},
 			Search: SearchCfg{
 				UseRipgrep:    true,
@@ -343,6 +351,12 @@ func (c *Config) Normalize() error {
 	}
 	if c.Tools.Shell.MaxTimeout < c.Tools.Shell.DefaultTimeout {
 		c.Tools.Shell.MaxTimeout = c.Tools.Shell.DefaultTimeout
+	}
+	if c.Tools.FS.MaxImageSourceBytes <= 0 {
+		c.Tools.FS.MaxImageSourceBytes = 32 << 20
+	}
+	if c.Tools.FS.ImageMaxEdge <= 0 {
+		c.Tools.FS.ImageMaxEdge = 2000
 	}
 	if c.Audit.Enabled && c.Audit.File == "" {
 		c.Audit.File = filepath.Join(c.Server.DataDir, "audit.jsonl")

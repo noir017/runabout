@@ -2,7 +2,6 @@ package tools
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -40,9 +39,10 @@ func (t *readTool) Definition() mcp.ToolDef {
 - 默认从第 1 行起最多 %d 行；大文件请用 offset/limit 分段读。
 - 单行超过 %d 字符会被截断。
 - raw=true 时不加行号，适合需要原样内容的场景。
-- 图片（png/jpg/gif/webp）会以图像形式返回；其他二进制文件会被拒绝，请改用 shell 里的 xxd/file。%s
+- 图片（png/jpg/gif/webp/bmp）会以图像形式返回；长边超过 %d 像素或处理后超过 %s 时自动缩小并转成 JPEG。%s
+- 其他二进制文件会被拒绝，请改用 shell 里的 xxd/file。
 - 少数凭据类文件（私钥、云凭据等）被策略禁止读取，会返回明确错误。`,
-			fs.DefaultLines, fs.MaxLineChars, remoteDoc),
+			fs.DefaultLines, fs.MaxLineChars, fs.ImageMaxEdge, humanBytes(int64(fs.MaxImageBytes)), remoteDoc),
 		InputSchema: schema(t.d.withTarget(map[string]any{
 			"path":   strProp("文件路径，绝对或相对（相对于默认工作目录）"),
 			"offset": intProp("起始行号，从 1 开始", 1, 0),
@@ -83,7 +83,21 @@ func (t *readTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 		return mcp.ToolError("%s%s 是目录，请用 list_dir", label(target), abs), nil
 	}
 	fs := t.d.Cfg.Tools.FS
-	if st.Size > int64(fs.MaxReadBytes) {
+	head, headErr := fsys.ReadHead(cc.Ctx, abs, 512)
+	mime, isImg := sniffImageMime(head)
+	if headErr != nil {
+		if isConnectError(headErr) {
+			return mcp.ToolError("%s", targetError(target.name, headErr)), nil
+		}
+		isImg = false
+	}
+	if isImg {
+		// 图片走单独的原始大小上限：几 MB 的截图要先能读进来，才有机会压缩。
+		if st.Size > int64(fs.MaxImageSourceBytes) {
+			return mcp.ToolError("%s图片 %s 有 %s，超过原始大小上限 %s；请先用 shell 里的图像工具缩小后再读",
+				label(target), abs, humanBytes(st.Size), humanBytes(int64(fs.MaxImageSourceBytes))), nil
+		}
+	} else if st.Size > int64(fs.MaxReadBytes) {
 		return mcp.ToolError("%s文件 %s 有 %s，超过单次读取上限 %s；请用 offset/limit 分段读，"+
 			"或用 shell 里的 sed -n / rg 定位后再读",
 			label(target), abs, humanBytes(st.Size), humanBytes(int64(fs.MaxReadBytes))), nil
@@ -97,8 +111,8 @@ func (t *readTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 		return mcp.ToolError("%s读取 %s 失败：%v", label(target), abs, err), nil
 	}
 
-	if mime, isImg := imageMime(abs); isImg {
-		return imageResult(label(target), abs, mime, data, fs.MaxImageBytes), nil
+	if isImg {
+		return t.readImage(cc, label(target), abs, mime, data, auditTarget(target)), nil
 	}
 	if isBinary(data) {
 		return mcp.ToolError("%s%s 看起来是二进制文件（%s）。如需查看请用 shell：file %s / xxd %s | head",
@@ -128,19 +142,6 @@ func (t *readTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 			meta["start_line"], meta["end_line"], meta["next_offset"])
 	}
 	return mcp.Text(header.String() + "\n\n" + text).WithStructured(meta), nil
-}
-
-// imageResult 把图片字节包装成 MCP 结果。本机与远端共用这一处，
-// 后续的压缩、视觉描述改造只需要改这里。
-func imageResult(prefix, path, mime string, data []byte, maxBytes int) *mcp.CallToolResult {
-	if maxBytes > 0 && len(data) > maxBytes {
-		return mcp.ToolError("%s图片 %s 有 %s，超过上限 %s", prefix, path,
-			humanBytes(int64(len(data))), humanBytes(int64(maxBytes)))
-	}
-	return &mcp.CallToolResult{Content: []mcp.Content{
-		mcp.TextContent(fmt.Sprintf("%s图片 %s（%s，%s）", prefix, path, mime, humanBytes(int64(len(data))))),
-		mcp.ImageContent(base64.StdEncoding.EncodeToString(data), mime),
-	}}
 }
 
 // formatLines 按行切片并可选加行号。
@@ -184,22 +185,6 @@ func formatLines(content string, offset, limit, maxLineChars int, raw bool) (str
 		return "(空文件)", meta
 	}
 	return strings.TrimRight(sb.String(), "\n"), meta
-}
-
-func imageMime(path string) (string, bool) {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".png":
-		return "image/png", true
-	case ".jpg", ".jpeg":
-		return "image/jpeg", true
-	case ".gif":
-		return "image/gif", true
-	case ".webp":
-		return "image/webp", true
-	case ".bmp":
-		return "image/bmp", true
-	}
-	return "", false
 }
 
 // isBinary 用"含 NUL 字节或大量非法 UTF-8"来判断二进制。

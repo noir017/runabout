@@ -91,6 +91,9 @@ func (d *Deps) fsFor(t targetInfo) (fleet.FS, *policy.PathGuard) {
 	if d.Cfg.Tools.FS.MaxImageBytes > limit {
 		limit = d.Cfg.Tools.FS.MaxImageBytes
 	}
+	if d.Cfg.Tools.FS.MaxImageSourceBytes > limit {
+		limit = d.Cfg.Tools.FS.MaxImageSourceBytes
+	}
 	return &fleet.RemoteFS{Runner: d.fleetOrLocal(), Target: t.name, MaxBytes: limit}, d.Paths
 }
 

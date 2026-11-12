@@ -26,6 +26,7 @@ cmd/runabout        CLI：serve / hash-password / gen-token / check-policy
         ├── internal/mcp       JSON-RPC 消息层、工具注册表、Streamable HTTP 传输
         ├── internal/tools     7 个默认 MCP 工具 + 配 fleet 时的 servers（另有 3 个保留实现但默认不暴露）
         ├── internal/fleet     机群执行层：本机 / ssh Runner，远端文件读写
+        ├── internal/imaging   读图前的缩放、重编码与可选视觉描述
         ├── internal/policy    shell AST 解析、风险规则、路径黑名单、确认令牌
         ├── internal/audit     JSONL 审计日志
         ├── internal/config    配置结构、默认值、校验
@@ -113,6 +114,20 @@ e2e 测试里专门验了这一条。
 - **服务自己的 data_dir 自动进黑名单**，否则 agent 可以直接改 `oauth.json` 给自己签令牌。
 - **本机写入一律"临时文件 + rename"**，中途失败不会留下半个文件；远端写回必须原地覆盖
   （`cat > 文件`），否则 inode 变化会让单文件 bind mount 失效。
+
+### 读图：缩放与重新编码
+
+截图是模型最常见的输入之一，但一张 4K PNG 轻松超过几 MB，原来 `read` 超过 4MB 就直接报错。
+现在图片走单独的原始大小上限（`fs.max_image_source_bytes`，默认 32MB），读进来后交给 `internal/imaging`：
+
+- 长边超过 `fs.image_max_edge`（默认 2000）或体积超过 `fs.max_image_bytes` 时，等比缩小并编码为 JPEG（质量 85）；
+  仍然超限就先降质量，到 40 后再按超出比例缩尺寸。
+- 没超限的图原样返回，不重新编码，避免无谓的画质损失。
+- 解码前先用 `image.DecodeConfig` 检查像素数（默认上限 30MP），挡住"小文件解出巨图"的解压炸弹。
+- 支持 png/jpeg/gif/webp/bmp；动图 GIF 只取第一帧。透明区域铺白底，因为 JPEG 没有 alpha。
+- 返回文字同时给出原尺寸和处理后尺寸，模型能知道图片被缩过。
+
+已知边界：重编码会丢掉 EXIF 方向信息和 ICC 色彩配置，带旋转标记的照片可能显示方向不对。
 
 ### apply_patch 为什么用 V4A 格式
 

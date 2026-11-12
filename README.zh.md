@@ -89,6 +89,8 @@ fleet:
 
 远端文件写回是原地覆盖（`cat > 文件`），inode 不变；多文件补丁写到一半断线无法回滚，结果里会列出已写入和未写入的文件。远端路径黑名单按字面匹配，不解析符号链接。
 
+`read` 读图时会在长边超过 `image_max_edge`（默认 2000px）或体积超过 `max_image_bytes` 时自动缩小并转成 JPEG，返回文字里同时给出原尺寸和处理后尺寸。图片的原始文件上限是 `max_image_source_bytes`（默认 32MB），不套用 `max_read_bytes`。
+
 ## 安全模型
 
 runabout 的设计目标是运行在反向代理或 Tunnel 后面，而不是直接把自己的 HTTP 服务暴露到公网。

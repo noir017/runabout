@@ -87,6 +87,8 @@ Hosts marked `approval: true` are probed only when `approval_check` exits 0; oth
 
 Remote file writes overwrite in place (`cat > file`) so the inode does not change. Multi-file patches cannot be rolled back if the connection drops; the result lists what was written and what was not. Remote path deny rules match literally and do not resolve symlinks.
 
+Images returned by `read` are downscaled and re-encoded as JPEG when their long edge exceeds `image_max_edge` (2000px by default) or their size exceeds `max_image_bytes`; the original and processed dimensions are both reported. The original file limit for images is `max_image_source_bytes` (32MB by default), separate from `max_read_bytes`.
+
 ## Security model
 
 runabout is not a sandbox. It is a **policy and access-control layer around a real Linux process**.
