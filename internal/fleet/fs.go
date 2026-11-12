@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -57,8 +58,8 @@ func (LocalFS) ReadHead(_ context.Context, path string, n int) ([]byte, error) {
 	}
 	defer f.Close()
 	buf := make([]byte, n)
-	read, err := f.Read(buf)
-	if err != nil && read == 0 {
+	read, err := io.ReadFull(f, buf)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
 		return nil, err
 	}
 	return buf[:read], nil

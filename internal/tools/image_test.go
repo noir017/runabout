@@ -337,3 +337,54 @@ func writePNGChunk(buf *bytes.Buffer, typ string, data []byte) {
 	binary.BigEndian.PutUint32(c[:], crc.Sum32())
 	buf.Write(c[:])
 }
+
+func TestReadRemoteImageCompressed(t *testing.T) {
+	d, dir := newFleetDeps(t, config.Fleet{})
+	d.Cfg.Tools.FS.ImageMaxEdge = 200
+	path := filepath.Join(dir, "remote-big.png")
+	writePNG(t, path, 600, 300)
+
+	res := callRaw(t, &readTool{d: d}, map[string]any{"target": "web1", "path": path})
+	if res.IsError {
+		t.Fatalf("远端读图失败: %s", textOf(res))
+	}
+	text := textOf(res)
+	if !strings.Contains(text, "[web1]") {
+		t.Errorf("图片说明应带机器名: %s", text)
+	}
+	if !strings.Contains(text, "600x300") || !strings.Contains(text, "200x100") {
+		t.Errorf("应给出原尺寸和处理后尺寸: %s", text)
+	}
+	if _, mime := findImage(t, res); mime != "image/jpeg" {
+		t.Errorf("远端大图应压缩成 JPEG，实际 %s", mime)
+	}
+}
+
+func TestReadRemoteFakeImageUsesTextLimit(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "ssh.log")
+	d, dir := newFleetDepsEnv(t, config.Fleet{}, map[string]string{"STUB_LOG": logPath})
+	d.Cfg.Tools.FS.MaxReadBytes = 50
+	d.Cfg.Tools.FS.MaxImageSourceBytes = 1 << 20
+	path := filepath.Join(dir, "fake.png")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("a"), 200), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, isErr := call(t, &readTool{d: d}, map[string]any{"target": "web1", "path": path})
+	if !isErr {
+		t.Fatal("改名成 .png 的远端文本应按文本上限拒绝")
+	}
+	if !strings.Contains(out, "超过单次读取上限") {
+		t.Errorf("应命中 max_read_bytes 而不是图片上限: %s", out)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "head -c 512") {
+		t.Errorf("远端应先读文件头嗅探 magic: %s", log)
+	}
+	if strings.Contains(string(log), "cat --") {
+		t.Errorf("判定为文本前不应把整个文件拉回来: %s", log)
+	}
+}
