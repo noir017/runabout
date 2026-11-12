@@ -559,7 +559,10 @@ func TestSensitivePathBlocked(t *testing.T) {
 	if !isErr || !strings.Contains(out, "敏感路径") {
 		t.Errorf("/etc/shadow 应被策略拒绝:\n%s", out)
 	}
-	out, isErr = h.callTool("write", map[string]any{"path": "/proc/sysrq-trigger", "content": "c"})
+	// write 工具默认不暴露，用 apply_patch 覆盖同一条写路径守卫。
+	out, isErr = h.callTool("apply_patch", map[string]any{
+		"patch": "*** Begin Patch\n*** Add File: /proc/sysrq-trigger\n+c\n*** End Patch",
+	})
 	if !isErr {
 		t.Errorf("写 /proc 应被拒绝:\n%s", out)
 	}
