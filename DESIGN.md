@@ -156,7 +156,26 @@ OpenAI 兼容的 `/chat/completions` 接口：启用后 `read` 除了 image 块�
 失败信息刻意写得可操作：上下文找不到时打印期望匹配的前 5 行，并明确让模型"先 read 确认再重试"。
 对已存在的文件用 `Add File` 会提示改用 `Update File` 或 `write`。这些都有测试守着。
 
-## 6. shell 的后台执行
+## 6. 只读 query 工具
+
+`query` 是一个可选工具（`tools.query.enabled`，默认关闭）。它存在的理由不是安全，而是**客户端的确认弹窗**：
+有的客户端对没有 readOnlyHint 的工具一律当写操作处理，查个日志也要用户点一次。`query` 标了
+readOnlyHint / idempotentHint、destructiveHint=false，让模型有一个不弹确认的查询入口。
+
+它不执行任意命令。`internal/policy/readonly.go` 复用 shell 的 AST 解析，只放行白名单里的命令：
+
+- 基础命令：ls、cat、head、tail、grep、rg、find、df、du、free、ps、uptime、ss、ip、journalctl、systemctl、docker 等。
+- 子命令级判定：`systemctl` 只认 status/is-active/list-units 一类；`docker` 按"对象 + 动词"白名单
+  （ps/logs/inspect/images 等）；`ip` 只认 show/list/get；`find` 拒绝 -exec/-delete；`journalctl` 拒绝
+  --vacuum/--rotate；`sort` 拒绝 -o；`rg` 拒绝 --pre。
+- 管道、`&&`、`;` 都允许，但每一段都要过白名单。
+- 写重定向（>、>>、&>）、命令替换、进程替换、含变量且无法展开的参数、解析不出来的命令名，一律拒绝。
+- 判定失败时返回具体原因，并提示改用 shell。
+
+在只读白名单之外，还会再跑一遍现有的 shell 风险规则：shell 里需要二次确认的命令（例如读取私钥）
+不能借 query 绕过确认。执行直接复用 shell 的本机逻辑（超时、进程组、输出截断），只是不签发确认令牌。
+
+## 7. shell 的后台执行
 
 HTTP 调用有超时，但编译、备份、压测动辄几分钟。所以 `shell` 支持 `run_in_background=true`，
 返回进程 id，再用 `shell_output`（支持 `only_new` 增量读、`wait_ms` 先等再读）和 `shell_kill` 收尾。
@@ -174,7 +193,7 @@ HTTP 调用有超时，但编译、备份、压测动辄几分钟。所以 `shel
 （这里踩过一个坑：`Write` 必须返回输入的完整长度，否则 `io.Writer` 约定下会被判为 short write，
 `exec` 会直接报"启动命令失败"。e2e 测试抓到了这个 bug。）
 
-## 7. 传输层细节
+## 8. 传输层细节
 
 - `POST /mcp` 提交消息、`GET /mcp` 开 SSE 下行流、`DELETE /mcp` 结束会话，符合 Streamable HTTP。
 - **会话默认宽松**：规范要求客户端回传 `Mcp-Session-Id`，但实际客户端不一定照做。
@@ -186,7 +205,7 @@ HTTP 调用有超时，但编译、备份、压测动辄几分钟。所以 `shel
 **错误分层**：参数结构不对（模型不该犯的错）→ JSON-RPC error；工具执行失败、策略拦截 →
 `isError: true` 的正常结果。后者模型能看到内容并自我修正，前者是协议级问题。
 
-## 8. 威胁模型
+## 9. 威胁模型
 
 | 威胁 | 应对 |
 |---|---|
@@ -205,12 +224,16 @@ HTTP 调用有超时，但编译、备份、压测动辄几分钟。所以 `shel
 这是功能定义，不是缺陷。想缩小爆炸半径应该在部署层做——用低权限用户跑、容器化、
 敏感目录不挂进去、需要提权的操作用 sudoers 精确授予。
 
-## 9. 测试策略
+## 10. 测试策略
 
 - `internal/policy/guard_test.go`：**40+ 条"必须放行"的日常命令**（`rm -rf ./node_modules`、
   `git reset --hard`、`docker compose up`、`chmod -R 755 ./public`、`dd of=/tmp/swapfile`……）
   和成组的"必须拦下"用例，外加专门的绕过尝试（`nohup sudo`、`sh -c` 嵌套、复合语句、`$HOME` 展开）。
   这两类用例同等重要：**误拦一条常用命令，助理就变得难用**。
+- `internal/policy/readonly_test.go`：成组的 query 放行/拒绝用例，覆盖白名单、写重定向、命令替换、
+  子命令级拦截（systemctl/docker/ip/find/journalctl）和"不能借 query 读私钥"。
+- `internal/imaging/*_test.go`：长边缩放、体积超限时的质量/尺寸收敛、像素上限、GIF 首帧、BMP/WebP 解码，
+  以及视觉接口的成功、HTTP 失败、空描述和超时。
 - `internal/tools/tools_test.go`：apply_patch 的更新/新增/删除/重命名/dry-run/空白容错/
   **失败时不落盘**、read 的行号与二进制拒绝、write 的原子与追加、search/glob 的忽略规则、
   shell 的超时/stdin/后台任务全链路。
@@ -220,7 +243,7 @@ HTTP 调用有超时，但编译、备份、压测动辄几分钟。所以 `shel
 - `internal/config/config_test.go`：**校验 `configs/config.example.yaml` 能被严格模式解析**，
   防止示例配置和结构体脱节——这种问题通常要等部署时才暴露。
 
-## 10. 可扩展点
+## 11. 可扩展点
 
 - **加工具**：实现 `mcp.Handler`（`Definition()` + `Call()`），在 `tools.All()` 里挂上。
   配置 `tools.disabled` 可以按名字下线。
@@ -231,7 +254,7 @@ HTTP 调用有超时，但编译、备份、压测动辄几分钟。所以 `shel
 - **多用户**：`auth.users` 已经是列表，令牌里带 subject，审计也记了。
   真要做多用户还需要按 subject 分权，目前所有人权限相同。
 
-## 11. 许可与 AGPL 第 13 条
+## 12. 许可与 AGPL 第 13 条
 
 项目按 AGPL-3.0-or-later 授权。选它而不是 MIT，是因为这类"代人操作服务器"的工具很容易被
 包装成闭源 SaaS 卖出去；AGPL 的网络条款要求改动后对外提供服务时必须开放对应源码。
@@ -243,7 +266,7 @@ HTTP 调用有超时，但编译、备份、压测动辄几分钟。所以 `shel
 
 自己部署给自己用不触发这条义务——第 13 条约束的是"让其他人通过网络使用"。
 
-## 12. 有意没做的事
+## 13. 有意没做的事
 
 - **细粒度 scope**：单人使用场景下，多一层 scope 只会让接入更容易出错。拿到令牌即拥有全部工具。
 - **内置 TLS / Let's Encrypt**：这台机器上已经有反代或隧道，再塞一套证书管理是重复劳动。

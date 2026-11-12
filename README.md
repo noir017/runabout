@@ -91,6 +91,8 @@ Images returned by `read` are downscaled and re-encoded as JPEG when their long 
 
 An optional vision model (`tools.fs.vision`, off by default) can append a text description of each image, for clients that do not pass MCP image blocks to the model. It calls an OpenAI-compatible `/chat/completions` endpoint; the API key is read from the environment variable named by `api_key_env`.
 
+An optional `query` tool (`tools.query.enabled`, off by default) runs a whitelist of read-only commands (ls, cat, grep, journalctl, systemctl status, docker ps, …) without triggering confirmations. Anything that cannot be proven read-only is rejected with a hint to use `shell`.
+
 ## Security model
 
 runabout is not a sandbox. It is a **policy and access-control layer around a real Linux process**.

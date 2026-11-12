@@ -71,6 +71,12 @@ tools:
   # 想下线某些工具就填名字，例如 ["write"] 只保留 apply_patch 改文件。
   disabled: []
 
+  # 只读查询工具。默认关闭。
+  # 打开后 agent 可以用 query 查状态、日志、进程，不会触发确认；
+  # 只接受 AST 判定为只读的命令，其他命令会被拒绝并提示改用 shell。
+  query:
+    enabled: false
+
   shell:
     path: "/bin/bash"
     default_timeout: 2m

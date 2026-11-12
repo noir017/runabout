@@ -49,6 +49,9 @@ func All(d *Deps) []mcp.Handler {
 	if d.fleetEnabled() {
 		candidates = append(candidates, &serversTool{d: d})
 	}
+	if d.Cfg.Tools.Query.Enabled {
+		candidates = append(candidates, &queryTool{d: d})
+	}
 	out := make([]mcp.Handler, 0, len(candidates))
 	for _, h := range candidates {
 		if d.Cfg.IsToolDisabled(h.Definition().Name) {

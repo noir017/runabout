@@ -122,6 +122,12 @@ type Tools struct {
 	Shell    ShellCfg  `yaml:"shell"`
 	FS       FSCfg     `yaml:"fs"`
 	Search   SearchCfg `yaml:"search"`
+	Query    QueryCfg  `yaml:"query"`
+}
+
+// QueryCfg 控制只读查询工具。默认关闭，打开后只接受 AST 判定为只读的命令。
+type QueryCfg struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type ShellCfg struct {

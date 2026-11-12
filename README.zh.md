@@ -93,6 +93,8 @@ fleet:
 
 可选开启视觉描述（`tools.fs.vision`，默认关闭）：客户端看不到 MCP 图片块时，`read` 会再附一段文字说明。接口需兼容 OpenAI 的 `/chat/completions`，API key 只从 `api_key_env` 指定的环境变量读取。
 
+可选开启只读查询工具 `query`（`tools.query.enabled`，默认关闭）：它只执行白名单内的只读命令（ls、cat、grep、journalctl、systemctl status、docker ps 等），不会触发确认；无法证明只读的命令会被拒绝并提示改用 `shell`。
+
 ## 安全模型
 
 runabout 的设计目标是运行在反向代理或 Tunnel 后面，而不是直接把自己的 HTTP 服务暴露到公网。
