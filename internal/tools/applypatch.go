@@ -199,6 +199,12 @@ func (t *applyPatchTool) plan(cc *mcp.CallContext, target targetInfo, fsys fleet
 		if !p.existing {
 			return nil, fmt.Errorf("%s 不存在，无法删除", abs)
 		}
+		// 远端 ReadFile 的上限可能是 max_image_source_bytes；删除只需要行数，
+		// 不要为一个非图片大文件把整个内容拉回来。
+		if int64(t.d.Cfg.Tools.FS.MaxReadBytes) < st.Size {
+			return nil, fmt.Errorf("%s 有 %s，超过 apply_patch 能处理的上限 %s；请改用 shell 删除",
+				abs, humanBytes(st.Size), humanBytes(int64(t.d.Cfg.Tools.FS.MaxReadBytes)))
+		}
 		data, err := fsys.ReadFile(cc.Ctx, abs)
 		if err != nil {
 			return nil, err

@@ -230,6 +230,24 @@ func TestApplyPatchRemoteKeepsInode(t *testing.T) {
 	}
 }
 
+func TestApplyPatchDeleteRemoteRejectsLargeFile(t *testing.T) {
+	d, dir := newFleetDeps(t, config.Fleet{})
+	d.Cfg.Tools.FS.MaxReadBytes = 50
+	d.Cfg.Tools.FS.MaxImageSourceBytes = 1 << 20
+	f := filepath.Join(dir, "large.txt")
+	if err := os.WriteFile(f, []byte(strings.Repeat("a", 200)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patch := "*** Begin Patch\n*** Delete File: " + f + "\n*** End Patch"
+	out, isErr := call(t, &applyPatchTool{d: d}, map[string]any{"target": "web1", "patch": patch})
+	if !isErr || !strings.Contains(out, "shell 删除") {
+		t.Errorf("超过 max_read_bytes 的远端删除应被拒绝: %s", out)
+	}
+	if _, err := os.Stat(f); err != nil {
+		t.Error("被拒绝的删除不应动文件")
+	}
+}
+
 func TestApplyPatchRemotePartialWriteListsFiles(t *testing.T) {
 	d, dir := newFleetDeps(t, config.Fleet{})
 	blocker := filepath.Join(dir, "blocker")
