@@ -110,7 +110,11 @@ func (t *searchTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTo
 
 	root := a.Path
 	if strings.TrimSpace(root) == "" {
-		root = t.d.Cfg.Tools.Shell.DefaultWorkdir
+		if target.remote {
+			root = t.d.remoteWorkdir(target)
+		} else {
+			root = t.d.Cfg.Tools.Shell.DefaultWorkdir
+		}
 	}
 	_, guard := t.d.fsFor(target)
 	abs, err := resolveReadPath(t.d, target, guard, root)

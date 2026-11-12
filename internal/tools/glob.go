@@ -87,7 +87,11 @@ func (t *globTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 	}
 	root := a.Path
 	if strings.TrimSpace(root) == "" {
-		root = t.d.Cfg.Tools.Shell.DefaultWorkdir
+		if target.remote {
+			root = t.d.remoteWorkdir(target)
+		} else {
+			root = t.d.Cfg.Tools.Shell.DefaultWorkdir
+		}
 	}
 	_, guard := t.d.fsFor(target)
 	abs, err := resolveReadPath(t.d, target, guard, root)
@@ -249,23 +253,27 @@ func (t *globTool) globRemote(ctx context.Context, target targetInfo, a globArgs
 	filter := true
 	expandedRoot := ""
 	listExit := 0
+	rootError := false
 	for _, line := range strings.Split(res.Stderr, "\n") {
 		switch {
 		case strings.HasPrefix(line, "root="):
 			expandedRoot = strings.TrimPrefix(line, "root=")
 		case line == "engine=rg":
 			engine, filter = "rg --files（远端）", false
+		case line == "__RB_ROOT_ERROR__":
+			rootError = true
 		case strings.HasPrefix(line, "list-exit="):
 			listExit, _ = strconv.Atoi(strings.TrimPrefix(line, "list-exit="))
 		}
 	}
-	if strings.Contains(res.Stderr, "root-error") {
+	if rootError {
 		return mcp.ToolError("%s目录不可用：%s", label(target), root), nil
 	}
 	if res.ExitCode != 0 {
 		return mcp.ToolError("%s查找失败：%s", label(target), remoteStderrDetail(res.Stderr)), nil
 	}
-	if listExit != 0 && listExit != 141 {
+	// rg --files 用 1 表示没有匹配；head 提前退出会让列表命令拿到 SIGPIPE(141)。
+	if listExit != 0 && listExit != 141 && !(engine == "rg --files（远端）" && listExit == 1) {
 		return mcp.ToolError("%s查找失败（exit=%d）：%s", label(target), listExit, remoteStderrDetail(res.Stderr)), nil
 	}
 	if expandedRoot == "" {
@@ -379,7 +387,7 @@ func (t *globTool) globRemote(ctx context.Context, target targetInfo, a globArgs
 // 错误和 head 提前退出造成的 SIGPIPE(141)。
 func (t *globTool) remoteGlobScript(a globArgs, root string, max int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "root=$(cd %s 2>/dev/null && pwd) || { printf 'root-error\\n' >&2; exit 1; }\n", fleet.QuotePath(root))
+	fmt.Fprintf(&b, "root=$(cd %s 2>/dev/null && pwd) || { printf '__RB_ROOT_ERROR__\\n' >&2; exit 1; }\n", fleet.QuotePath(root))
 	b.WriteString("printf 'root=%s\\n' \"$root\" >&2\n")
 
 	absolute := strings.HasPrefix(a.Pattern, "/")
@@ -429,7 +437,7 @@ func (t *globTool) remoteGlobScript(a globArgs, root string, max int) string {
 	if limit < 500 {
 		limit = 500
 	}
-	fmt.Fprintf(&b, " | head -n %d | while IFS= read -r f; do stat -c '%%s|%%Y|%%f|%%n' -- \"$f\" 2>/dev/null; done", limit)
+	fmt.Fprintf(&b, " | head -n %d | while IFS= read -r f; do stat -c '%%s|%%Y|%%f|%%n' -- \"$f\" 2>/dev/null || true; done", limit)
 	return b.String()
 }
 
