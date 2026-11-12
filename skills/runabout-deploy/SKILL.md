@@ -98,6 +98,24 @@ docker run --rm runabout:0.1.0 gen-token
 把哈希填到 `auth.users[0].password_hash`，令牌填到 `auth.static_tokens`。
 容器里必须 `listen: "0.0.0.0:8484"`，写 `127.0.0.1` 宿主机映射不进来。
 
+**机群（可选）**：要让同一个入口操作多台机器，加 `fleet` 段：
+
+```yaml
+fleet:
+  ssh_command: ["ssh", "-o", "BatchMode=yes"]
+  probe_timeout: 10s
+  # 部署时填"查询本地授权状态"的命令，{host} 会替换成机器名；退出 0 表示已授权。
+  approval_check: ""
+  hosts:
+    - name: web1
+      desc: 对外服务宿主
+    - name: nas
+      desc: 家庭 NAS
+      approval: true
+```
+
+容器里要有 ssh 客户端和能用的 ssh_config。runabout 不实现审批：`approval: true` 只是提示和探测开关，真正的阻塞在 ssh 层。审批等待时长用 `tools.shell.env` 配，必须短于客户端的工具调用超时。不写 `hosts` 就是单机模式，工具里不会出现 `target`。
+
 `.env` 与 `config.yaml` 都含密码哈希/令牌，**不入库**，权限收紧：
 
 ```bash

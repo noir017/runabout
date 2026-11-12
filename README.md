@@ -39,15 +39,16 @@ Typical uses:
 
 The important security boundary is the process identity. If runabout runs as `root`, the agent effectively has root access. Prefer a dedicated user, container, filesystem mounts, and narrowly scoped sudo rules.
 
-## Seven core tools
+## Eight core tools
 
-The default MCP surface is intentionally limited to **7 tools**. Some older implementations still exist in the source tree, but they are not exposed by default.
+The default MCP surface is intentionally limited to **8 tools**. Some older implementations still exist in the source tree, but they are not exposed by default.
 
 | Tool | Purpose |
 |---|---|
 | `shell` | Run a Bash command in the configured environment; supports foreground and background jobs. |
 | `shell_output` | Read captured stdout/stderr from a background job. |
 | `shell_kill` | Send a signal to a background job and terminate it. |
+| `servers` | Probe one machine or all configured machines: load, memory, root disk, containers, failed units. |
 | `read` | Read files, with line numbers and bounded output. |
 | `apply_patch` | Make precise, context-aware file changes without replacing an entire file. |
 | `search` | Search file contents using regular expressions. |
@@ -62,6 +63,29 @@ This split is intentional:
 
 The result is a small tool vocabulary that is easier for models to choose from and easier for operators to audit.
 
+## Fleet mode
+
+By default runabout operates the machine it runs on. A `fleet` section lets one endpoint reach several machines over ssh:
+
+```yaml
+fleet:
+  ssh_command: ["ssh", "-o", "BatchMode=yes"]
+  probe_timeout: 10s
+  approval_check: ""        # optional: exit 0 means this host is already approved
+  hosts:
+    - name: web1
+      desc: public web host
+    - name: nas
+      desc: home NAS
+      approval: true
+```
+
+With `hosts` non-empty, `shell`, `read`, `search`, `glob`, `apply_patch` and `servers` gain a `target` parameter whose enum lists the machines plus `local`. Without it, no `target` appears and behavior is unchanged. `servers` probes all hosts in parallel (30-second cache) or returns one host's snapshot.
+
+Hosts marked `approval: true` are probed only when `approval_check` exits 0; otherwise they show as needing approval. runabout does not implement approval — the ssh layer blocks until the user approves.
+
+Remote file writes overwrite in place (`cat > file`) so the inode does not change. Multi-file patches cannot be rolled back if the connection drops; the result lists what was written and what was not. Remote path deny rules match literally and do not resolve symlinks.
+
 ## Security model
 
 runabout is not a sandbox. It is a **policy and access-control layer around a real Linux process**.
@@ -71,7 +95,7 @@ Security comes from several layers:
 1. **OAuth 2.1 + PKCE** protects the remote MCP endpoint.
 2. **Bearer authentication** can be used for static-token clients and automation.
 3. **Shell policy** can deny or require confirmation for risky commands.
-4. **Path guards** can deny reads/writes to selected paths for file tools.
+4. **Path guards** can deny reads/writes to selected paths for file tools (remote paths are matched literally).
 5. **Confirmation tokens** allow an agent to stop and request approval before a risky action.
 6. **Audit logging** records tool calls for later inspection.
 7. **OS/container permissions** remain the final boundary.
@@ -274,6 +298,7 @@ The most commonly changed settings are:
 | Client registration | `auth.allow_dynamic_registration`, `auth.registration_token`, `auth.allow_unauthenticated_initialize` |
 | MCP tools | `tools.disabled` |
 | Shell execution | `tools.shell.default_workdir`, timeouts, `max_background`, `env` |
+| Fleet | `fleet.hosts`, `fleet.ssh_command`, `fleet.probe_timeout`, `fleet.approval_check` |
 | File access | `policy.write_deny_paths`, `policy.read_deny_paths` |
 | Shell policy | `policy.disabled_shell_rules`, `policy.downgrade_to_confirm`, `policy.extra_shell_rules` |
 | Audit | `audit.enabled`, `audit.log_args`, `audit.file` |
@@ -342,12 +367,13 @@ internal/app          HTTP application assembly
 internal/auth         OAuth 2.1 and bearer authentication
 internal/mcp          JSON-RPC, MCP registry, Streamable HTTP
 internal/tools        shell and agent tools
+internal/fleet        local/ssh runners and remote file access
 internal/policy       shell rules, path guards, confirmations
 internal/audit        JSONL audit logging
 internal/config       YAML configuration and validation
 ```
 
-To add a tool, implement `mcp.Handler` (`Definition()` + `Call()`) and register it in `tools.All()`. Keep the default tool surface small; a new tool should provide a capability that cannot be expressed cleanly by the existing seven.
+To add a tool, implement `mcp.Handler` (`Definition()` + `Call()`) and register it in `tools.All()`. Keep the default tool surface small; a new tool should provide a capability that cannot be expressed cleanly by the existing eight.
 
 `configs/config.example.yaml` is parsed in strict mode by tests, so keep it synchronized with the configuration structs.
 

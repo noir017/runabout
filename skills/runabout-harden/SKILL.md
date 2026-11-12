@@ -82,6 +82,16 @@ runabout hash-password    # 至少 8 位，程序会拒绝更短的
 agent ALL=(root) NOPASSWD: /usr/bin/systemctl restart myapp, /usr/bin/journalctl
 ```
 
+## 机群
+
+配了 `fleet.hosts` 等于把 shell 权限扩大到每台机器，只加确实需要 agent 操作的机器。
+
+- `approval: true` 不是权限控制，只是工具描述里的提示和 `servers` 的探测开关；真正的拦截在 ssh 层。
+- `approval_check` 必须是只查询本地状态的命令。不要让它触发审批申请，否则 `servers` 总览会替用户发申请。
+- 远端路径黑名单按字面匹配，不解析符号链接：`/tmp/x -> /etc/shadow` 这类路径在远端挡不住。
+- 远端 `shell_kill` 只断开本地 ssh，远端进程可能继续跑；要确保停止，命令里自己写 pidfile 或交给 systemd。
+- 确认令牌绑定 `target`，换机器必须重新确认。
+
 ## 策略规则
 
 先看内置规则怎么判，再决定要不要改：
@@ -168,6 +178,7 @@ docker run --rm -v runabout_mcp-data:/d -v "$PWD":/out alpine \
 - [ ] `.env` / `config.yaml` 权限 600，且不在 git 里
 - [ ] 静态令牌只发给自动化，没进任何会同步到云端的配置
 - [ ] 服务不是 root 跑的
+- [ ] 机群机器清单是最小集合，`approval_check` 只查状态、不触发申请
 - [ ] `no-new-privileges` 与 sudo 的取舍是想清楚的，不是默认来的
 - [ ] 审计开着，且日志有转走的去处
 - [ ] `smoke.sh` 全绿

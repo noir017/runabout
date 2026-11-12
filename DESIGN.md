@@ -24,7 +24,8 @@ cmd/runabout        CLI：serve / hash-password / gen-token / check-policy
   └── internal/app         装配：把各层拼成一个 http.Handler（Build 可被测试直接调用）
         ├── internal/auth      OAuth 2.1 授权服务器 + Bearer 校验中间件
         ├── internal/mcp       JSON-RPC 消息层、工具注册表、Streamable HTTP 传输
-        ├── internal/tools     7 个默认 MCP 工具的实现（另有 3 个保留实现但默认不暴露）
+        ├── internal/tools     8 个默认 MCP 工具的实现（另有 3 个保留实现但默认不暴露）
+        ├── internal/fleet     机群执行层：本机 / ssh Runner，远端文件读写
         ├── internal/policy    shell AST 解析、风险规则、路径黑名单、确认令牌
         ├── internal/audit     JSONL 审计日志
         ├── internal/config    配置结构、默认值、校验
@@ -104,12 +105,14 @@ e2e 测试里专门验了这一条。
 
 - **路径黑名单只作用于文件工具**，不作用于 shell。原因：shell 明确要完整权限，
   而文件工具是模型最常"顺手"调用的东西，凭据文件（私钥、云 token）一旦被 `read` 出来就进了对话历史，
-  等于泄露给模型服务方。所以 `~/.ssh/id_*`、`~/.aws/credentials`、`~/.config/gh/hosts.yml`
+  等于泄露给模型服务方。所以 `**/.ssh/id_*`、`**/.aws/credentials`、`**/.config/gh/hosts.yml`
   这些默认禁读；shell 里 `cat` 它们则是 confirm 级——因为 `git push`（用密钥但不打印）必须放行。
-- **软链接逃逸**：`Resolve` 会对路径中已存在的部分做 `EvalSymlinks`，保留不存在的尾部，
+- **软链接逃逸**：本机 `Resolve` 会对路径中已存在的部分做 `EvalSymlinks`，保留不存在的尾部，
   所以 `/tmp/x -> /etc/shadow` 挡得住。匹配时同时用解析后路径和原始输入比一遍。
+  远端路径按字面匹配，不解析符号链接（见"机群"一节的已知边界）。
 - **服务自己的 data_dir 自动进黑名单**，否则 agent 可以直接改 `oauth.json` 给自己签令牌。
-- **写入一律"临时文件 + rename"**，中途失败不会留下半个文件。
+- **本机写入一律"临时文件 + rename"**，中途失败不会留下半个文件；远端写回必须原地覆盖
+  （`cat > 文件`），否则 inode 变化会让单文件 bind mount 失效。
 
 ### apply_patch 为什么用 V4A 格式
 
@@ -220,3 +223,21 @@ HTTP 调用有超时，但编译、备份、压测动辄几分钟。所以 `shel
 - **内置 TLS / Let's Encrypt**：这台机器上已经有反代或隧道，再塞一套证书管理是重复劳动。
 - **数据库**：单实例、令牌数量以十计，JSON 文件 + 原子替换足够，省一个依赖就省一处运维。
 - **工具级 sandbox**：真正的隔离应该由容器提供，在应用层做半套沙箱只会给人虚假的安全感。
+
+## 13. 机群（可选）
+
+配了 `fleet.hosts` 之后，同一个 MCP 入口可以操作多台机器；不配时工具里不出现 `target`，行为和单机完全一样。本机保留名是 `local`。
+
+- **执行层**（`internal/fleet`）：本机沿用独立进程组、超时和头尾截断；远端执行 `ssh_command + 主机 + 一条命令`，由远端登录 shell 解析，workdir 拼成 `cd -- '<dir>' &&`，env 用 `export` 拼进去。`tools.shell.env` 传给本地 ssh 进程，审批脚本从那里读等待时长。
+- **`target` 参数**：enum 直接写进工具 schema，参数描述每台机器一行，模型不用先调发现工具。需审批的机器标【需审批】。
+- **`servers`**：总览并行探测，单台超时 `fleet.probe_timeout`，结果缓存 30 秒。`approval: true` 的机器只有 `approval_check` 退出 0 才探测，否则显示"需审批"；没配 `approval_check` 就不探测。runabout 不实现审批，审批仍然是容器里那条会阻塞的 ssh。
+- **文件工具**：通过 `FS`（Stat / ReadFile / WriteFile / Remove）操作目标机器，远端实现经 Runner 执行 `stat`/`cat`。图片字节拿回来后走同一个 `imageResult`，本机和远端没有分叉。
+- **确认令牌**：指纹是 `Fingerprint("shell", target, command, workdir)`，本机签发的令牌不能拿到别的机器上用；审计记录带 `target`。
+
+### 已知边界
+
+- **远端黑名单不解析符号链接**：只对远端路径做字面匹配，`/tmp/x -> /etc/shadow` 这类软链接在远端挡不住。本机路径仍会 `EvalSymlinks`。
+- **远端后台任务被 kill 时只断开连接**：`shell_kill` 杀的是本地 ssh 进程组，远端进程可能继续跑。要确保远端停止，命令里自己写 pidfile 或交给 systemd。
+- **多文件写回不能回滚**：`apply_patch` 先把所有文件取回、在本地算完，全部通过后才逐个写；远端写到一半断线时无法回滚，结果里会列出已写入和未写入的文件。
+- **远端写回必须原地覆盖**：用 `cat > 文件` 而不是临时文件 + rename，否则 inode 变化会让 docker 单文件挂载失效。
+- **探测脚本只保证 POSIX sh**：`servers` 的探测只用 `uname`/`cut`/`awk`/`df`/`command -v`，busybox 上能跑；远端 search/glob 有 rg 用 rg，没有就退回 `grep -rnE` 和 `find`，回退时部分参数可能不生效。

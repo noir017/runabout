@@ -100,6 +100,25 @@ tools:
     ignore_dirs: [".git", "node_modules", "vendor", ".venv", "venv",
                   "__pycache__", "dist", "build", "target", ".next", ".cache"]
 
+fleet:
+  # 不写 hosts 就是单机模式：工具里不会出现 target 参数，行为和以前一样。
+  # 写了 hosts 之后，shell / read / search / glob / apply_patch 都会多一个 target，
+  # enum 里列出下面所有机器名，默认 local（runabout 所在的容器）。
+  ssh_command: ["ssh", "-o", "BatchMode=yes"]
+  # servers 总览里单台机器的探测超时。
+  probe_timeout: 10s
+  # 可选。判断需审批的机器现在有没有授权：{host} 替换成机器名，退出码 0 表示已授权。
+  # 它只查询本地状态，不会发起申请；留空时不探测需审批的机器。
+  approval_check: ""
+  hosts: []
+  #  - name: web1
+  #    desc: 对外服务宿主
+  #    ssh: web1              # 不写就与 name 相同
+  #    approval: false
+  #  - name: nas
+  #    desc: 家庭 NAS / 容器主力
+  #    approval: true
+
 policy:
   # 二次确认令牌的有效期。
   confirm_ttl: 5m
@@ -115,19 +134,20 @@ policy:
     - "/etc/shadow"
     - "/etc/sudoers"
     - "/etc/sudoers.d/**"
-    - "~/.ssh/authorized_keys"
+    - "**/.ssh/authorized_keys"
 
   # 凭据类文件：既禁止文件工具读取，也让 shell 里的 cat/base64 之类需要二次确认。
+  # 远端路径按字面匹配，不解析符号链接；** 让规则在任意用户、任意机器上都命中。
   read_deny_paths:
     - "/etc/shadow"
-    - "~/.ssh/id_*"
-    - "~/.ssh/*_rsa"
-    - "~/.ssh/*_ed25519"
-    - "~/.aws/credentials"
-    - "~/.config/gh/hosts.yml"
-    - "~/.docker/config.json"
-    - "~/.kube/config"
-    - "~/.netrc"
+    - "**/.ssh/id_*"
+    - "**/.ssh/*_rsa"
+    - "**/.ssh/*_ed25519"
+    - "**/.aws/credentials"
+    - "**/.config/gh/hosts.yml"
+    - "**/.docker/config.json"
+    - "**/.kube/config"
+    - "**/.netrc"
 
   # 按 id 关掉内置 shell 规则（用 `runabout check-policy` 看 id）。
   disabled_shell_rules: []

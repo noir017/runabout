@@ -39,21 +39,22 @@ ChatGPT / Claude Code / 其他 MCP 客户端
 
 最重要的安全边界是进程身份。如果 runabout 以 `root` 运行，Agent 实际上就拥有 root 权限。建议使用专用用户、容器、明确的文件系统挂载以及范围尽可能小的 sudo 规则。
 
-## 7 个核心工具
+## 8 个核心工具
 
-默认 MCP 工具面板刻意限制为 **7 个工具**。源码中仍可能保留一些旧实现，但它们默认不会暴露给 MCP 客户端。
+默认 MCP 工具面板刻意限制为 **8 个工具**。源码中仍可能保留一些旧实现，但它们默认不会暴露给 MCP 客户端。
 
 | 工具 | 用途 |
 |---|---|
 | `shell` | 在配置的环境中执行 Bash 命令，支持前台和后台任务。 |
 | `shell_output` | 读取后台任务捕获的 stdout/stderr。 |
 | `shell_kill` | 向后台任务发送信号并终止任务。 |
+| `servers` | 查看一台或全部机器的负载、内存、根分区、容器和失败的 systemd 单元。 |
 | `read` | 读取文件，提供行号并限制输出大小。 |
 | `apply_patch` | 使用精确的上下文补丁修改文件，而不是整体覆盖文件。 |
 | `search` | 使用正则表达式搜索文件内容。 |
 | `glob` | 根据 glob 模式查找文件，并限制结果数量。 |
 
-这 7 个工具有意覆盖 Agent 最核心的工作流：
+这 8 个工具有意覆盖 Agent 最核心的工作流：
 
 ```text
 发现 → 检查 → 编辑 → 执行 → 观察
@@ -63,6 +64,29 @@ ChatGPT / Claude Code / 其他 MCP 客户端
 ```
 
 `write`、`list_dir` 和 `shell_list` 在源码中仍可能保留，用于实现内部功能或其他场景，但默认不会出现在 MCP 工具列表中。这样可以减少模型的选择空间，并避免多个工具提供重复能力。
+
+## 机群模式
+
+默认只操作 runabout 所在的机器。配置 `fleet` 段后，同一个入口可以经 ssh 操作多台机器：
+
+```yaml
+fleet:
+  ssh_command: ["ssh", "-o", "BatchMode=yes"]
+  probe_timeout: 10s
+  approval_check: ""        # 可选：退出码 0 表示这台机器当前已授权
+  hosts:
+    - name: web1
+      desc: 对外服务宿主
+    - name: nas
+      desc: 家庭 NAS
+      approval: true
+```
+
+配了 `hosts` 之后，`shell`、`read`、`search`、`glob`、`apply_patch` 和 `servers` 都会多一个 `target` 参数，enum 列出全部机器名和 `local`；不配时没有 `target`，行为和单机完全一样。`servers` 会并行探测所有机器（结果缓存 30 秒），带 `target` 时返回单台详情。
+
+标了 `approval: true` 的机器只有在 `approval_check` 退出 0 时才探测，否则显示"需审批"。runabout 不实现审批，审批由 ssh 层阻塞等待。
+
+远端文件写回是原地覆盖（`cat > 文件`），inode 不变；多文件补丁写到一半断线无法回滚，结果里会列出已写入和未写入的文件。远端路径黑名单按字面匹配，不解析符号链接。
 
 ## 安全模型
 
@@ -74,7 +98,7 @@ runabout 的设计目标是运行在反向代理或 Tunnel 后面，而不是直
 2. **OAuth 2.1 + PKCE** — 远程 MCP 客户端通过内置授权服务器进行认证。
 3. **进程身份** — 命令使用运行 runabout 的 Unix 用户身份执行。
 4. **Shell 策略** — 可以拒绝危险命令模式，或要求确认后执行。
-5. **路径保护** — 文件操作可以限制敏感路径的读取和写入。
+5. **路径保护** — 文件操作可以限制敏感路径的读取和写入（远端路径按字面匹配）。
 6. **确认令牌** — 需要审批的操作可以通过明确的确认令牌执行。
 7. **审计日志** — 可以将工具调用记录为 JSONL 日志。
 
@@ -447,6 +471,7 @@ runabout version                  显示版本信息
 | 客户端注册 | `auth.allow_dynamic_registration`、`auth.registration_token`、`auth.allow_unauthenticated_initialize` |
 | 禁用工具 | `tools.disabled` |
 | Shell | `tools.shell.default_workdir`、timeout、`max_background`、`env` |
+| 机群 | `fleet.hosts`、`fleet.ssh_command`、`fleet.probe_timeout`、`fleet.approval_check` |
 | 文件访问 | `policy.write_deny_paths`、`policy.read_deny_paths` |
 | Shell 策略 | `policy.disabled_shell_rules`、`policy.downgrade_to_confirm`、`policy.extra_shell_rules` |
 | 审计 | `audit.enabled`、`audit.log_args`、`audit.file` |
@@ -498,6 +523,9 @@ internal/mcp
 internal/tools
     MCP Tool 实现
 
+internal/fleet
+    本机 / ssh 执行层与远端文件读写
+
 internal/policy
     Shell 规则、路径保护和确认令牌
 
@@ -531,7 +559,7 @@ tools.All()
 
 进行注册。
 
-默认工具集合应该保持精简。新增工具应该提供现有 7 个工具无法清晰表达的新能力，而不是简单地为已有操作提供另一种实现方式。
+默认工具集合应该保持精简。新增工具应该提供现有 8 个工具无法清晰表达的新能力，而不是简单地为已有操作提供另一种实现方式。
 
 ### Shell 规则
 

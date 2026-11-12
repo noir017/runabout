@@ -125,6 +125,18 @@ docker compose logs --tail=30
 二者只能选一个：要 sudo 就注释掉 `no-new-privileges`；要那层加固就
 `SUDO_NOPASSWD=false` 重新构建，然后靠挂载和 uid 授权而不是 sudo。
 
+### 某台机器连不上 / 一直显示需审批
+
+先调 `servers`，每台机器一行，连不上的会直接带 ssh 报错。按顺序查：
+
+1. 报错是 `Connection refused` / `Could not resolve hostname`：查 ssh 别名和容器里的 ssh_config。
+2. 显示"需审批"：`approval_check` 退出码非 0。让用户批准，或检查命令里的 `{host}` 是否替换成了正确的机器名。
+3. 没配 `approval_check` 时，`approval: true` 的机器不会被探测，显示"需审批"是预期行为。
+4. 用 `shell target=<机器> command='true'` 单独试一条，报错比总览更直接。
+
+远端后台任务被 `shell_kill` 后，远端进程可能还在跑 —— kill 只断开本地 ssh。用
+`shell target=<机器>` 跑 `ps` 确认。
+
 ### 工具调用被拦
 
 ```bash
@@ -137,6 +149,7 @@ docker exec runabout runabout check-policy 'rm -rf /var/log'
 `policy.disabled_shell_rules` 按 id 直接关掉某条规则。
 文件工具（read/write/apply_patch/search/glob/list_dir）受 `write_deny_paths` /
 `read_deny_paths` 约束，**shell 工具按设计不受这两项约束**，它只走 shell 规则。
+确认令牌绑定 `target`：在 A 机器上签发的令牌不能拿到 B 机器上用，换机器要重新确认。
 
 ### 后台任务的输出读不全
 
