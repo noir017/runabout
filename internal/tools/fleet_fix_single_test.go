@@ -46,3 +46,18 @@ func TestSingleMachineReadStructuredNoTarget(t *testing.T) {
 		t.Errorf("单机模式 read 的 structuredContent 不应带 target: %v", meta)
 	}
 }
+
+func TestSingleMachineShellStartErrorMatchesMain(t *testing.T) {
+	d, _ := newTestDeps(t)
+	d.Cfg.Tools.Shell.Path = "/nonexistent/runabout-shell"
+	out, isErr := call(t, &shellTool{d: d}, map[string]any{"command": "true"})
+	if !isErr || !strings.HasPrefix(out, "启动命令失败: ") || strings.Contains(out, "[local]") {
+		t.Errorf("前台启动失败文案应与 main 一致: %s", out)
+	}
+	out, isErr = call(t, &shellTool{d: d}, map[string]any{
+		"command": "true", "run_in_background": true,
+	})
+	if !isErr || !strings.HasPrefix(out, "启动后台命令失败: ") || strings.Contains(out, "[local]") {
+		t.Errorf("后台启动失败文案应与 main 一致: %s", out)
+	}
+}

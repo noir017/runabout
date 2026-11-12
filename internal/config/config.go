@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -380,11 +381,26 @@ func (c *Config) normalizeFleet() error {
 		}
 		seen[h.Name] = true
 		h.Workdir = strings.TrimSpace(h.Workdir)
+		if h.Workdir != "" && !validRemoteWorkdir(h.Workdir) {
+			return fmt.Errorf("fleet.hosts[%d].workdir 必须是绝对路径、~ 或 ~/...，当前为 %q", i, h.Workdir)
+		}
 		if strings.TrimSpace(h.SSH) == "" {
 			h.SSH = h.Name
 		}
 	}
 	return nil
+}
+
+// validRemoteWorkdir 只接受远端可判定的路径：绝对路径、~ 或 ~/...。
+// 相对路径和 ~user 形式会绕过绝对路径黑名单，直接拒绝。
+func validRemoteWorkdir(p string) bool {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		return true
+	}
+	if strings.HasPrefix(p, "~") {
+		return false
+	}
+	return path.IsAbs(p)
 }
 
 // IsToolDisabled 报告某工具是否被配置关闭。

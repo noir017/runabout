@@ -177,8 +177,8 @@ func auditTarget(t targetInfo) string {
 	return t.name
 }
 
-// remoteBase 是远端相对路径的基准：机器配置的 workdir，没配就是家目录。
-func (d *Deps) remoteBase(t targetInfo) string {
+// remoteWorkdir 是远端 shell 和文件工具共用的默认工作目录。
+func (d *Deps) remoteWorkdir(t targetInfo) string {
 	if t.host.Workdir != "" {
 		return t.host.Workdir
 	}
@@ -208,7 +208,7 @@ func resolveWritePath(d *Deps, t targetInfo, guard *policy.PathGuard, p string) 
 }
 
 func resolveRemotePath(d *Deps, t targetInfo, guard *policy.PathGuard, p string, write bool) (string, error) {
-	joined := remoteJoin(d.remoteBase(t), p)
+	joined := remoteJoin(d.remoteWorkdir(t), p)
 	var resolved string
 	var err error
 	if write {

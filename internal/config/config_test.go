@@ -65,6 +65,28 @@ func TestFleetDefaultsAndValidation(t *testing.T) {
 	}
 }
 
+func TestFleetRejectsUnsafeWorkdir(t *testing.T) {
+	base := func() *Config {
+		cfg := Default()
+		cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x"}}
+		return cfg
+	}
+	for _, wd := range []string{"sub", "..", "../app", "~user/app"} {
+		cfg := base()
+		cfg.Fleet.Hosts = []FleetHost{{Name: "web1", Workdir: wd}}
+		if err := cfg.Normalize(); err == nil {
+			t.Errorf("workdir %q 应被拒绝", wd)
+		}
+	}
+	for _, wd := range []string{"", "~", "~/app", "/srv/app"} {
+		cfg := base()
+		cfg.Fleet.Hosts = []FleetHost{{Name: "web1", Workdir: wd}}
+		if err := cfg.Normalize(); err != nil {
+			t.Errorf("workdir %q 应被接受: %v", wd, err)
+		}
+	}
+}
+
 func TestBaseURLRequired(t *testing.T) {
 	cfg := Default()
 	cfg.Server.BaseURL = ""

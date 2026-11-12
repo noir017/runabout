@@ -164,15 +164,12 @@ func firstRuleID(v policy.Verdict) string {
 
 func (t *shellTool) resolveWorkdir(target targetInfo, dir string) (string, error) {
 	if target.remote {
+		base := t.d.remoteWorkdir(target)
 		if strings.TrimSpace(dir) == "" {
-			if target.host.Workdir == "" || target.host.Workdir == "~" {
+			if base == "~" {
 				return "", nil // 不 cd，交给远端登录 shell 的家目录
 			}
-			return target.host.Workdir, nil
-		}
-		base := target.host.Workdir
-		if base == "" {
-			base = "~"
+			return base, nil
 		}
 		return remoteJoin(base, dir), nil
 	}
@@ -206,6 +203,9 @@ func (t *shellTool) runForeground(cc *mcp.CallContext, a shellArgs, target targe
 		MaxOutputBytes: t.d.Cfg.Tools.Shell.MaxOutputBytes,
 	})
 	if err != nil {
+		if !target.labeled {
+			return mcp.ToolError("启动命令失败: %v", err), nil
+		}
 		return mcp.ToolError("%s", targetError(target.name, err)), nil
 	}
 
@@ -261,6 +261,9 @@ func (t *shellTool) runBackground(cc *mcp.CallContext, a shellArgs, target targe
 	})
 	if err != nil {
 		cancel()
+		if !target.labeled {
+			return mcp.ToolError("启动后台命令失败: %v", err), nil
+		}
 		return mcp.ToolError("%s", targetError(target.name, err)), nil
 	}
 
