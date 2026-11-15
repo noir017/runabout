@@ -251,9 +251,9 @@ func Default() *Config {
 				MaxLineChars:        2000,
 				DefaultLines:        2000,
 				MaxWriteBytes:       8 << 20,
-				MaxImageBytes:       4 << 20,
+				MaxImageBytes:       1536 << 10,
 				MaxImageSourceBytes: 32 << 20,
-				ImageMaxEdge:        2000,
+				ImageMaxEdge:        1568,
 				MaxImagePixels:      30_000_000,
 				MaxImageConcurrency: 2,
 				Vision:              VisionCfg{Timeout: 30 * time.Second},
@@ -380,7 +380,7 @@ func (c *Config) Normalize() error {
 		c.Tools.FS.MaxImageSourceBytes = 32 << 20
 	}
 	if c.Tools.FS.ImageMaxEdge <= 0 {
-		c.Tools.FS.ImageMaxEdge = 2000
+		c.Tools.FS.ImageMaxEdge = 1568
 	}
 	if c.Tools.FS.MaxImagePixels <= 0 {
 		c.Tools.FS.MaxImagePixels = 30_000_000

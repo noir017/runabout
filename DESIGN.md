@@ -122,8 +122,10 @@ e2e 测试里专门验了这一条。
 截图是模型最常见的输入之一，但一张 4K PNG 轻松超过几 MB，原来 `read` 超过 4MB 就直接报错。
 现在图片走单独的原始大小上限（`fs.max_image_source_bytes`，默认 32MB），读进来后交给 `internal/imaging`：
 
-- 长边超过 `fs.image_max_edge`（默认 2000）或体积超过 `fs.max_image_bytes` 时，等比缩小并编码为 JPEG（质量 85）；
-  仍然超限就先降质量，到 40 后再按超出比例缩尺寸。
+- 长边超过 `fs.image_max_edge`（默认 1568）或体积超过 `fs.max_image_bytes` 时，等比缩小并编码为 JPEG（质量 80）；
+  仍然超限就先降质量，到 40 后再按超出比例缩尺寸。1568 是模型读图前的常见长边，再大只是白费带宽。
+- 缩放用 `disintegration/imaging` 的 Lanczos：临时缓冲是 `目标宽×源高×4` 字节，25MP 图峰值约 145MB；
+  `golang.org/x/image/draw` 的 kernel 缩放器要 `×32` 字节（float64），同样输入峰值 350MB 以上。
 - 没超限的图原样返回，不重新编码，避免无谓的画质损失。
 - 解码前先用 `image.DecodeConfig` 检查像素数（`fs.max_image_pixels`，默认 30MP），挡住"小文件解出巨图"的解压炸弹。
 - 是不是图片看文件头 magic，不看扩展名：改名成 `.png` 的大文本仍按 `max_read_bytes` 拒绝，不会整个读进内存。

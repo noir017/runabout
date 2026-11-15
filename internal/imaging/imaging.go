@@ -7,27 +7,30 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/jpeg"
 	"math"
+
+	"github.com/disintegration/imaging"
 
 	_ "image/gif"
 	_ "image/png"
 
 	_ "golang.org/x/image/bmp"
-	"golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 )
 
 const (
 	// DefaultMaxEdge 是长边上限：超过它的图会被缩小。
-	DefaultMaxEdge = 2000
+	// 模型读图前通常会把长边缩到 1568 左右，再大只是白费带宽和内存。
+	DefaultMaxEdge = 1568
 	// DefaultMaxBytes 是处理后图片的体积上限。
-	DefaultMaxBytes = 4 << 20
+	DefaultMaxBytes = 1536 << 10 // 1.5 MiB
 	// DefaultMaxPixels 是解码前的像素数上限，用来挡住解压炸弹。
 	// 30MP 已覆盖 6K 截图，解码后约 120MB，容器里不至于打爆内存。
 	DefaultMaxPixels = 30_000_000
 
-	initialQuality = 85
+	initialQuality = 80
 	minQuality     = 40
 	maxRounds      = 16
 )
@@ -110,9 +113,16 @@ func Process(data []byte, opt Options) (*Result, error) {
 
 	quality := initialQuality
 	var last bytes.Buffer
+	var rendered image.Image
+	renderedW, renderedH := -1, -1
 	for round := 0; round < maxRounds; round++ {
+		// 只降质量时尺寸不变，复用上一次的缩放结果，避免每轮重算。
+		if tw != renderedW || th != renderedH {
+			rendered = render(src, tw, th)
+			renderedW, renderedH = tw, th
+		}
 		last.Reset()
-		if err := jpeg.Encode(&last, render(src, tw, th), &jpeg.Options{Quality: quality}); err != nil {
+		if err := jpeg.Encode(&last, rendered, &jpeg.Options{Quality: quality}); err != nil {
 			return nil, fmt.Errorf("编码 JPEG 失败: %w", err)
 		}
 		if last.Len() <= opt.MaxBytes {
@@ -146,10 +156,15 @@ func Process(data []byte, opt Options) (*Result, error) {
 
 // render 把 src 缩放到 w×h 并铺在白底上。JPEG 没有 alpha，
 // 透明区域直接编码会变成黑色，截图和图表会很难看。
+// 缩放用 imaging 的 Lanczos：临时缓冲是 目标宽×源高×4 字节，
+// 而 x/image 的 kernel 缩放器要 ×32 字节（float64），大图峰值能差 200MB 以上。
 func render(src image.Image, w, h int) *image.RGBA {
+	if b := src.Bounds(); b.Dx() != w || b.Dy() != h {
+		src = imaging.Resize(src, w, h, imaging.Lanczos)
+	}
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	draw.Draw(dst, dst.Bounds(), &image.Uniform{C: color.White}, image.Point{}, draw.Src)
-	draw.CatmullRom.Scale(dst, dst.Bounds(), src, src.Bounds(), draw.Over, nil)
+	draw.Draw(dst, dst.Bounds(), src, src.Bounds().Min, draw.Over)
 	return dst
 }
 

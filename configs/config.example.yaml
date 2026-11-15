@@ -94,12 +94,13 @@ tools:
     default_lines: 2000
     max_write_bytes: 8388608
     # 图片处理后的体积上限；超过就降质量、再缩尺寸。
-    max_image_bytes: 4194304
+    max_image_bytes: 1572864
     # 图片原始文件大小上限。图片不套用 max_read_bytes，
     # 否则几 MB 的截图在压缩前就会被拒。
     max_image_source_bytes: 33554432
-    # 读图时自动缩放的长边上限（像素）。
-    image_max_edge: 2000
+    # 读图时自动缩放的长边上限（像素）。模型读图前也会缩到 1568 左右，
+    # 再大只是白费带宽和内存。
+    image_max_edge: 1568
     # 解码前的像素数上限，防止小文件解出巨图。
     max_image_pixels: 30000000
     # 同时处理的图片张数上限。

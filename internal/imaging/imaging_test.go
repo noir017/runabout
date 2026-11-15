@@ -47,8 +47,8 @@ func TestProcessResizesLargeImage(t *testing.T) {
 	if res.Width != 2000 || res.Height != 1000 {
 		t.Errorf("缩放尺寸应为 2000x1000，实际 %dx%d", res.Width, res.Height)
 	}
-	if res.MIME != "image/jpeg" || res.Quality != 85 {
-		t.Errorf("应编码为质量 85 的 JPEG，实际 %s q=%d", res.MIME, res.Quality)
+	if res.MIME != "image/jpeg" || res.Quality != 80 {
+		t.Errorf("应编码为质量 80 的 JPEG，实际 %s q=%d", res.MIME, res.Quality)
 	}
 	if res.SourceWidth != 3000 || res.SourceHeight != 1500 || res.SourceBytes != len(src) {
 		t.Errorf("原图信息不对: %+v", res)
@@ -59,6 +59,20 @@ func TestProcessResizesLargeImage(t *testing.T) {
 	}
 	if format != "jpeg" || img.Bounds().Dx() != 2000 || img.Bounds().Dy() != 1000 {
 		t.Errorf("解码结果不对: %s %v", format, img.Bounds())
+	}
+}
+
+func TestProcessDefaults(t *testing.T) {
+	src := encodePNG(t, gradient(2000, 1000))
+	res, err := Process(src, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Resized || res.Width != 1568 || res.Height != 784 {
+		t.Errorf("默认应缩到长边 1568（1568x784），实际 %dx%d", res.Width, res.Height)
+	}
+	if res.Quality != 80 {
+		t.Errorf("默认质量应为 80，实际 %d", res.Quality)
 	}
 }
 
