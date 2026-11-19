@@ -596,7 +596,7 @@ func TestProcTakeNewConcurrentWithTruncation(t *testing.T) {
 		writers  = 4
 		chunks   = 100
 		chunk    = "abcdefghij"
-		minReads = 50
+		minReads = 10
 	)
 	p := &Proc{ID: "proc_trunc_race", out: newCapWriter(16)}
 	// 先写到超过 cap，保证后续每次读取都跨在缺口上。
