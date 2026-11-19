@@ -705,44 +705,56 @@ func TestClientDropsOversizedNonWhitelistedTool(t *testing.T) {
 	}
 }
 
-// TestClientRejectsOversizedToolsListPage 验证 tools/list 单页有独立的上限。
+// TestClientRejectsOversizedToolsListPage 验证 tools/list 单页有独立的上限，
+// JSON 与 SSE 两种响应都算体积。
 func TestClientRejectsOversizedToolsListPage(t *testing.T) {
-	fake := newFake()
-	fake.tools = []Tool{{
-		Name:        "echo",
-		Description: strings.Repeat("x", 2<<10),
-		InputSchema: json.RawMessage(`{"type":"object"}`),
-	}}
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
+	for _, sse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sse=%v", sse), func(t *testing.T) {
+			fake := newFake()
+			fake.sse = sse
+			fake.tools = []Tool{{
+				Name:        "echo",
+				Description: strings.Repeat("x", 2<<10),
+				InputSchema: json.RawMessage(`{"type":"object"}`),
+			}}
+			srv := httptest.NewServer(fake)
+			defer srv.Close()
 
-	c := NewClient(testConfig(srv.URL))
-	c.listPageLimit = 1 << 10
-	_, err := c.ListTools(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "上限") {
-		t.Fatalf("单页超限应报错，实际: %v", err)
+			c := NewClient(testConfig(srv.URL))
+			c.listPageLimit = 1 << 10
+			_, err := c.ListTools(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "上限") {
+				t.Fatalf("单页超限应报错，实际: %v", err)
+			}
+		})
 	}
 }
 
-// TestClientRejectsCumulativeToolsListBytes 验证分页累计超过总上限时报错。
+// TestClientRejectsCumulativeToolsListBytes 验证分页累计超过总上限时报错，
+// JSON 与 SSE 两种响应都算体积。
 func TestClientRejectsCumulativeToolsListBytes(t *testing.T) {
-	fake := newFake()
-	for i := 0; i < 3; i++ {
-		fake.pages = append(fake.pages, []Tool{{
-			Name:        "echo",
-			Description: strings.Repeat("x", 2<<10),
-			InputSchema: json.RawMessage(`{"type":"object"}`),
-		}})
-	}
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
+	for _, sse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sse=%v", sse), func(t *testing.T) {
+			fake := newFake()
+			fake.sse = sse
+			for i := 0; i < 3; i++ {
+				fake.pages = append(fake.pages, []Tool{{
+					Name:        "echo",
+					Description: strings.Repeat("x", 2<<10),
+					InputSchema: json.RawMessage(`{"type":"object"}`),
+				}})
+			}
+			srv := httptest.NewServer(fake)
+			defer srv.Close()
 
-	c := NewClient(testConfig(srv.URL))
-	c.listPageLimit = 4 << 10
-	c.listTotalLimit = 5 << 10
-	_, err := c.ListTools(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "累计") {
-		t.Fatalf("累计超限应报错，实际: %v", err)
+			c := NewClient(testConfig(srv.URL))
+			c.listPageLimit = 4 << 10
+			c.listTotalLimit = 5 << 10
+			_, err := c.ListTools(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "累计") {
+				t.Fatalf("累计超限应报错，实际: %v", err)
+			}
+		})
 	}
 }
 
@@ -960,8 +972,9 @@ func TestManagerOversizedToolKeepsPreviousDefinition(t *testing.T) {
 	}
 }
 
-// TestManagerOversizedToolWithoutPreviousUsesFallback 验证没有上一版定义时用占位定义。
-func TestManagerOversizedToolWithoutPreviousUsesFallback(t *testing.T) {
+// TestManagerOversizedToolWithoutPreviousUsesPlaceholder 验证没有上一版定义时
+// 用专门的占位描述说明定义超限，而不是说工具不在上游列表里。
+func TestManagerOversizedToolWithoutPreviousUsesPlaceholder(t *testing.T) {
 	fake := newFake()
 	fake.tools = []Tool{{
 		Name:        "echo",
@@ -976,8 +989,14 @@ func TestManagerOversizedToolWithoutPreviousUsesFallback(t *testing.T) {
 		t.Fatalf("单个工具超限不应让整次刷新失败: %v", err)
 	}
 	def := m.Definition("fake", "fk", "echo")
-	if def.Name != "fk_echo" || !strings.Contains(def.Description, "没有") {
-		t.Errorf("没有上一版时应给占位定义，实际 %+v", def)
+	if def.Name != "fk_echo" {
+		t.Errorf("占位定义应带前缀，实际 %q", def.Name)
+	}
+	if !strings.Contains(def.Description, "超过大小上限") || !strings.Contains(def.Description, "原样转发") {
+		t.Errorf("占位描述应说明定义超限且调用仍会转发，实际 %q", def.Description)
+	}
+	if strings.Contains(def.Description, "没有") {
+		t.Errorf("占位描述不应说工具不在列表里，实际 %q", def.Description)
 	}
 }
 

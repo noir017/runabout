@@ -186,7 +186,7 @@ func (m *Manager) refresh(ctx context.Context, ep *endpoint) error {
 		if reason, rejected := list.Rejected[name]; rejected {
 			def, ok := prev[name]
 			if !ok {
-				def = ep.fallbackDef(name, true)
+				def = ep.oversizedDef(name)
 			}
 			defs[name] = def
 			bad = append(bad, badTool{name: name, reason: reason})
@@ -307,6 +307,18 @@ func (ep *endpoint) fallbackDef(tool string, fetched bool) mcp.ToolDef {
 	return mcp.ToolDef{
 		Name:        ep.cfg.Prefix + "_" + tool,
 		Description: desc,
+		InputSchema: fallbackSchema(),
+	}
+}
+
+// oversizedDef 是定义超限且没有上一版时的占位定义。
+// 工具本身仍在上游列表里，调用会原样转发，因此不能用"列表里没有"的描述。
+func (ep *endpoint) oversizedDef(tool string) mcp.ToolDef {
+	return mcp.ToolDef{
+		Name: ep.cfg.Prefix + "_" + tool,
+		Description: fmt.Sprintf(
+			"上游 %s 的工具 %s 定义超过大小上限，本次未更新；调用仍会原样转发。",
+			ep.cfg.Name, tool),
 		InputSchema: fallbackSchema(),
 	}
 }
