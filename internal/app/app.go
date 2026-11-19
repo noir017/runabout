@@ -20,6 +20,7 @@ import (
 	"github.com/noir017/runabout/internal/mcp"
 	"github.com/noir017/runabout/internal/policy"
 	"github.com/noir017/runabout/internal/tools"
+	"github.com/noir017/runabout/internal/upstream"
 )
 
 // Version 由构建时通过 -ldflags 注入。
@@ -90,15 +91,17 @@ func Build(cfg *config.Config, log *slog.Logger) (*Built, error) {
 	if err != nil {
 		return nil, fmt.Errorf("加载 shell 策略失败: %w", err)
 	}
+	upMgr := upstream.New(cfg.Upstreams, log)
 	deps := &tools.Deps{
-		Cfg:     cfg,
-		Paths:   policy.NewPathGuard(cfg.Policy, cfg.Tools.Shell.DefaultWorkdir),
-		Shell:   shellGuard,
-		Confirm: policy.NewConfirmStore(cfg.Policy.ConfirmTTL),
-		Audit:   aud,
-		Procs:   tools.NewProcManager(cfg.Tools.Shell.MaxBackground),
-		Fleet:   fleet.New(cfg.Fleet, cfg.Tools.Shell.Path, cfg.Tools.Shell.Env),
-		Log:     log,
+		Cfg:       cfg,
+		Paths:     policy.NewPathGuard(cfg.Policy, cfg.Tools.Shell.DefaultWorkdir),
+		Shell:     shellGuard,
+		Confirm:   policy.NewConfirmStore(cfg.Policy.ConfirmTTL),
+		Audit:     aud,
+		Procs:     tools.NewProcManager(cfg.Tools.Shell.MaxBackground),
+		Fleet:     fleet.New(cfg.Fleet, cfg.Tools.Shell.Path, cfg.Tools.Shell.Env),
+		Upstreams: upMgr,
+		Log:       log,
 	}
 
 	mcpSrv := mcp.NewServer(mcp.Implementation{
@@ -106,6 +109,11 @@ func Build(cfg *config.Config, log *slog.Logger) (*Built, error) {
 	}, serverInstructions(len(cfg.Fleet.Hosts) > 0), log)
 	mcpSrv.SetAuditor(aud)
 	mcpSrv.Register(tools.All(deps)...)
+	// 工具集合已注册；后台立即拉取上游定义并按周期刷新。
+	upMgr.Start()
+	if len(cfg.Upstreams) > 0 {
+		log.Info("上游 MCP 透传已启用", "upstreams", len(cfg.Upstreams))
+	}
 
 	transport := mcp.NewHTTPTransport(mcpSrv, mcp.HTTPOptions{
 		BaseURL:        cfg.Server.BaseURL,
@@ -141,6 +149,7 @@ func Build(cfg *config.Config, log *slog.Logger) (*Built, error) {
 		Handler: withRecover(withRequestLog(log, mux)),
 		Tools:   mcpSrv.ToolNames(),
 		Close: func() {
+			upMgr.Close()
 			deps.Procs.KillAll()
 			_ = aud.Close()
 		},

@@ -248,3 +248,15 @@ extensions:
     #  - "{title}"
     timeout: 60s
     max_output_bytes: 200000
+
+# 可选：上游 MCP 透传（默认关闭）。配置后，白名单内的上游工具会以
+# <prefix>_<工具名> 出现在 tools/list，tools/call 原样转发给上游。
+# runabout 不关心上游是什么；上游不可达只让对应工具报错，不影响自身工具。
+upstreams: []
+#  - name: example                      # 唯一，用于日志与报错
+#    url: "http://127.0.0.1:8790/mcp"   # MCP Streamable HTTP 端点
+#    token_env: "EXAMPLE_MCP_TOKEN"    # Bearer 令牌的环境变量名；留空表示不带鉴权
+#    prefix: "ex"                       # 对外工具名为 ex_<工具名>
+#    tools: ["list_items", "read_item"]  # 必填白名单，白名单外的一律不暴露
+#    refresh_interval: 10m              # 工具列表刷新间隔，默认 10m
+#    timeout: 60s                       # 单次上游请求超时，默认 60s

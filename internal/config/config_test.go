@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestExampleConfigParses 保证仓库里的示例配置与结构体不脱节。
@@ -112,6 +113,71 @@ func TestAuthRequiresCredentials(t *testing.T) {
 	// 报错信息要能直接告诉人下一步做什么
 	if want := "hash-password"; !contains(err.Error(), want) {
 		t.Errorf("错误信息应提示怎么生成密码哈希，实际: %v", err)
+	}
+}
+
+func TestUpstreamConfig(t *testing.T) {
+	base := func() *Config {
+		cfg := Default()
+		cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x"}}
+		return cfg
+	}
+
+	cfg := base()
+	cfg.Upstreams = []Upstream{{
+		Name: "fd", URL: "http://127.0.0.1:9000/mcp", Prefix: "fd",
+		TokenEnv: "FD_MCP_TOKEN", Tools: []string{" topic_list ", "topic_read", "topic_list"},
+	}}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	u := cfg.Upstreams[0]
+	if u.Tools[0] != "topic_list" || len(u.Tools) != 2 {
+		t.Errorf("工具白名单应 trim 并去重，实际 %v", u.Tools)
+	}
+	if u.RefreshInterval != 10*time.Minute || u.Timeout != 60*time.Second {
+		t.Errorf("默认值不对: refresh=%v timeout=%v", u.RefreshInterval, u.Timeout)
+	}
+
+	// 默认配置必须没有上游（默认关闭）。
+	if len(Default().Upstreams) != 0 {
+		t.Error("默认配置不应启用任何上游")
+	}
+}
+
+func TestUpstreamConfigRejectsInvalid(t *testing.T) {
+	valid := func() Upstream {
+		return Upstream{Name: "fd", URL: "http://127.0.0.1:9000/mcp", Prefix: "fd", Tools: []string{"topic_list"}}
+	}
+	cases := map[string]func(*Config){
+		"空名字":          func(c *Config) { c.Upstreams[0].Name = "" },
+		"重复名字":         func(c *Config) { c.Upstreams = append(c.Upstreams, valid()) },
+		"空 URL":        func(c *Config) { c.Upstreams[0].URL = "" },
+		"非 http":       func(c *Config) { c.Upstreams[0].URL = "ftp://example.com/mcp" },
+		"URL 带凭据":      func(c *Config) { c.Upstreams[0].URL = "http://user:pass@example.com/mcp" },
+		"空前缀":          func(c *Config) { c.Upstreams[0].Prefix = "" },
+		"非法前缀":         func(c *Config) { c.Upstreams[0].Prefix = "fd x" },
+		"空白名单":         func(c *Config) { c.Upstreams[0].Tools = nil },
+		"非法工具名":        func(c *Config) { c.Upstreams[0].Tools = []string{"bad tool"} },
+		"非法 token_env": func(c *Config) { c.Upstreams[0].TokenEnv = "1BAD" },
+		"与内置工具重名":      func(c *Config) { c.Upstreams[0].Prefix = "shell"; c.Upstreams[0].Tools = []string{"output"} },
+		"跨上游重名": func(c *Config) {
+			second := valid()
+			second.Name = "other"
+			second.Prefix = "fd"
+			c.Upstreams = append(c.Upstreams, second)
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x"}}
+			cfg.Upstreams = []Upstream{valid()}
+			mutate(cfg)
+			if err := cfg.Normalize(); err == nil {
+				t.Error("非法配置应报错")
+			}
+		})
 	}
 }
 

@@ -93,6 +93,28 @@ An optional vision model (`tools.fs.vision`, off by default) can append a text d
 
 An optional `query` tool (`tools.query.enabled`, off by default) runs a whitelist of read-only commands (ls, cat, grep, journalctl, systemctl status, docker ps, …) without triggering confirmations. Options, subcommands and find predicates are checked against explicit allowlists; anything that cannot be proven read-only is rejected with a hint to use `shell`.
 
+## Upstream MCP passthrough
+
+An optional `upstreams` list lets one runabout endpoint front other MCP servers. It is **off by default** (empty list). Each entry exposes a whitelist of the upstream's tools as `<prefix>_<tool>`; runabout does not interpret the upstream's business logic.
+
+```yaml
+upstreams:
+  - name: example                      # unique; used in logs and error messages
+    url: "http://127.0.0.1:8790/mcp"   # MCP Streamable HTTP endpoint
+    token_env: "EXAMPLE_MCP_TOKEN"    # Bearer token env var; omit for no auth
+    prefix: "ex"                       # exposed as ex_<tool>
+    tools: ["list_items", "read_item"]  # required whitelist
+    refresh_interval: 10m              # default 10m
+    timeout: 60s                       # default 60s
+```
+
+- The tool list is fetched in the background at startup and refreshed every `refresh_interval`. Descriptions, titles and `inputSchema` come from the upstream.
+- Only whitelisted tools are exposed. The exposed name set is fixed by config, so `tools/list` stays stable even while the upstream is down.
+- `tools/call` is forwarded verbatim, and the upstream result is returned unchanged, including content blocks and fields runabout does not model.
+- Tokens are read from the named environment variable at request time. Do not put credentials in the config file.
+- An unreachable upstream only makes its own tools return an error; runabout's built-in tools are unaffected.
+- Passthrough calls are audited like any other tool call, under the prefixed tool name.
+
 ## Security model
 
 runabout is not a sandbox. It is a **policy and access-control layer around a real Linux process**.
@@ -310,6 +332,7 @@ The most commonly changed settings are:
 | File access | `policy.write_deny_paths`, `policy.read_deny_paths`, `policy.deny_paths`, `policy.target_deny_paths` |
 | Shell policy | `policy.disabled_shell_rules`, `policy.downgrade_to_confirm`, `policy.extra_shell_rules` |
 | Extensions | `extensions.skill`, `extensions.fleetherd_task` (disabled by default) |
+| Upstream passthrough | `upstreams` (disabled by default) |
 | Audit | `audit.enabled`, `audit.log_args`, `audit.file` |
 | Source disclosure | `server.source_url` |
 

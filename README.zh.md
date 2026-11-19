@@ -95,6 +95,28 @@ fleet:
 
 可选开启只读查询工具 `query`（`tools.query.enabled`，默认关闭）：它只执行白名单内的只读命令（ls、cat、grep、journalctl、systemctl status、docker ps 等），不会触发确认；选项、子命令和 find 谓词都按允许列表校验，无法证明只读的命令会被拒绝并提示改用 `shell`。
 
+## 上游 MCP 透传
+
+可选的 `upstreams` 列表让一个 runabout 端点代管其他 MCP 服务，**默认关闭**（空列表）。每项把上游的一组工具以 `<prefix>_<工具名>` 暴露出去；runabout 不解释上游的业务语义。
+
+```yaml
+upstreams:
+  - name: example                      # 唯一，用于日志与报错
+    url: "http://127.0.0.1:8790/mcp"   # MCP Streamable HTTP 端点
+    token_env: "EXAMPLE_MCP_TOKEN"    # Bearer 令牌的环境变量名；留空表示不带鉴权
+    prefix: "ex"                       # 对外工具名为 ex_<工具名>
+    tools: ["list_items", "read_item"]  # 必填白名单
+    refresh_interval: 10m              # 默认 10m
+    timeout: 60s                       # 默认 60s
+```
+
+- 启动后在后台立即拉取工具列表，之后按 `refresh_interval` 定期刷新；描述、标题与 `inputSchema` 都来自上游。
+- 只暴露白名单内的工具。对外工具集合由配置固定，上游宕机时 `tools/list` 仍然稳定。
+- `tools/call` 原样转发，上游结果原样返回，包括 runabout 不认识的内容块与字段。
+- 令牌在每次请求时从指定的环境变量读取，配置文件里不写明文凭据。
+- 上游不可达只让对应工具返回错误，不影响 runabout 自身的工具。
+- 透传调用和其他工具一样进审计日志，工具名为加了前缀后的名字。
+
 ## 安全模型
 
 runabout 的设计目标是运行在反向代理或 Tunnel 后面，而不是直接把自己的 HTTP 服务暴露到公网。
@@ -483,6 +505,7 @@ runabout version                  显示版本信息
 | 文件访问 | `policy.write_deny_paths`、`policy.read_deny_paths`、`policy.deny_paths`、`policy.target_deny_paths` |
 | Shell 策略 | `policy.disabled_shell_rules`、`policy.downgrade_to_confirm`、`policy.extra_shell_rules` |
 | 可选扩展 | `extensions.skill`、`extensions.fleetherd_task`（默认关闭） |
+| 上游透传 | `upstreams`（默认关闭） |
 | 审计 | `audit.enabled`、`audit.log_args`、`audit.file` |
 | Source URL | `server.source_url` |
 

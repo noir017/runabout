@@ -12,3 +12,6 @@ data/
 audit.jsonl
 oauth.json
 deploy/.env
+
+# git worktree 目录
+.worktrees/

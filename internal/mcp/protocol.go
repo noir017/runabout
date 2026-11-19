@@ -140,6 +140,23 @@ type CallToolResult struct {
 	Content           []Content `json:"content"`
 	StructuredContent any       `json:"structuredContent,omitempty"`
 	IsError           bool      `json:"isError,omitempty"`
+	// raw 非空时按上游原始 JSON 序列化，用于透传场景保留未知字段与内容块。
+	raw json.RawMessage
+}
+
+// RawResult 用上游返回的原始 JSON 作为序列化结果。Content 与 IsError 仍会
+// 被填写，供审计与协议层判断使用，但不会影响最终输出。
+func RawResult(raw json.RawMessage) *CallToolResult {
+	return &CallToolResult{raw: raw}
+}
+
+// MarshalJSON 在设置了 raw 时直接输出上游原文。
+func (r *CallToolResult) MarshalJSON() ([]byte, error) {
+	if len(r.raw) > 0 {
+		return r.raw, nil
+	}
+	type plain CallToolResult
+	return json.Marshal((*plain)(r))
 }
 
 // Text 构造一个成功结果。

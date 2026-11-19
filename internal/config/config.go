@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -28,6 +29,29 @@ type Config struct {
 	Audit  Audit  `yaml:"audit"`
 	// Extensions 是默认关闭、按配置启用的可选集成扩展工具（如 skill、fleetherd_task）。
 	Extensions Extensions `yaml:"extensions,omitempty"`
+	// Upstreams 是可选的上游 MCP 透传配置。空列表表示关闭（默认）。
+	Upstreams []Upstream `yaml:"upstreams,omitempty"`
+}
+
+// Upstream 是一个上游 MCP 服务（Streamable HTTP）。启用后，白名单里的工具
+// 以 <prefix>_<工具名> 出现在 tools/list，调用原样转发给上游。
+// runabout 不关心上游是什么，也不解析它的业务语义。
+type Upstream struct {
+	// Name 用于日志与错误信息，必须在 upstreams 里唯一。
+	Name string `yaml:"name"`
+	// URL 是上游的 MCP Streamable HTTP 端点（http 或 https）。
+	URL string `yaml:"url"`
+	// TokenEnv 是存放 Bearer 令牌的环境变量名；留空表示不带鉴权。
+	// 配置文件里永远不写明文令牌。
+	TokenEnv string `yaml:"token_env,omitempty"`
+	// Prefix 是暴露给客户端的工具名前缀，最终名字为 <prefix>_<工具名>。
+	Prefix string `yaml:"prefix"`
+	// Tools 是允许透传的上游工具白名单，必填。白名单之外的工具不会被暴露。
+	Tools []string `yaml:"tools"`
+	// RefreshInterval 是重新拉取工具列表的间隔，默认 10m。
+	RefreshInterval time.Duration `yaml:"refresh_interval,omitempty"`
+	// Timeout 是单次上游请求（含 tools/call）的超时，默认 60s。
+	Timeout time.Duration `yaml:"timeout,omitempty"`
 }
 
 // Extensions 控制可选扩展工具。所有扩展默认关闭，不改变默认工具列表。
@@ -450,6 +474,9 @@ func (c *Config) Normalize() error {
 	if err := c.normalizeExtensions(); err != nil {
 		return err
 	}
+	if err := c.normalizeUpstreams(); err != nil {
+		return err
+	}
 	// 服务自身的数据目录永远不允许被文件工具改写，否则 agent 可以自签令牌。
 	c.Policy.WriteDenyPaths = append(c.Policy.WriteDenyPaths,
 		c.Server.DataDir, filepath.Join(c.Server.DataDir, "**"))
@@ -601,6 +628,94 @@ func (c *Config) normalizeExtensions() error {
 		// 防止模型通过 read / search / apply_patch / shell 重定向直读明文 token。
 		pat := strings.TrimRight(ft.WebBridgeDir, "/") + "/**"
 		c.Policy.DenyPaths = append(c.Policy.DenyPaths, pat)
+	}
+	return nil
+}
+
+// upstreamNameRE 约束上游名与工具前缀：都只允许字母、数字、下划线、连字符。
+var (
+	upstreamNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+	upstreamToolRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	envNameRE      = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+)
+
+// reservedToolNames 是 runabout 自己实现过的工具名。上游工具加了前缀后
+// 仍可能撞上（例如 prefix=shell、tool=output），启动前直接拒绝。
+var reservedToolNames = map[string]bool{
+	"shell": true, "shell_output": true, "shell_kill": true, "shell_list": true,
+	"read": true, "write": true, "apply_patch": true, "search": true, "glob": true,
+	"list_dir": true, "servers": true, "query": true, "skill": true, "fleetherd_task": true,
+}
+
+// normalizeUpstreams 校验上游 MCP 透传配置并补齐默认值。
+func (c *Config) normalizeUpstreams() error {
+	seenName := map[string]bool{}
+	// exposed 记录已占用的对外工具名，值为上游名，便于报错时定位。
+	exposed := map[string]string{}
+	for i := range c.Upstreams {
+		u := &c.Upstreams[i]
+		u.Name = strings.TrimSpace(u.Name)
+		if u.Name == "" {
+			return fmt.Errorf("upstreams[%d].name 不能为空", i)
+		}
+		if seenName[u.Name] {
+			return fmt.Errorf("upstreams 里的名字 %q 重复", u.Name)
+		}
+		seenName[u.Name] = true
+
+		u.URL = strings.TrimSpace(u.URL)
+		parsed, err := url.Parse(u.URL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return fmt.Errorf("upstreams[%d].url 必须是 http(s) 绝对地址，当前为 %q", i, u.URL)
+		}
+		if parsed.User != nil {
+			return fmt.Errorf("upstreams[%d].url 里不要写凭据，令牌请用 token_env", i)
+		}
+
+		u.Prefix = strings.TrimSpace(u.Prefix)
+		if !upstreamNameRE.MatchString(u.Prefix) {
+			return fmt.Errorf("upstreams[%d].prefix 只能包含字母、数字、下划线与连字符，当前为 %q", i, u.Prefix)
+		}
+		u.TokenEnv = strings.TrimSpace(u.TokenEnv)
+		if u.TokenEnv != "" && !envNameRE.MatchString(u.TokenEnv) {
+			return fmt.Errorf("upstreams[%d].token_env 不是合法的环境变量名: %q", i, u.TokenEnv)
+		}
+
+		if len(u.Tools) == 0 {
+			return fmt.Errorf("upstreams[%d].tools 白名单不能为空（按需列出要透传的上游工具）", i)
+		}
+		cleaned := make([]string, 0, len(u.Tools))
+		seenTool := map[string]bool{}
+		for _, raw := range u.Tools {
+			tool := strings.TrimSpace(raw)
+			if !upstreamToolRE.MatchString(tool) {
+				return fmt.Errorf("upstreams[%d].tools 里的工具名 %q 不合法", i, raw)
+			}
+			if seenTool[tool] {
+				continue
+			}
+			seenTool[tool] = true
+			full := u.Prefix + "_" + tool
+			if len(full) > 128 {
+				return fmt.Errorf("upstreams[%d] 暴露的工具名 %q 超过 128 个字符", i, full)
+			}
+			if reservedToolNames[full] {
+				return fmt.Errorf("upstreams[%d] 暴露的工具名 %q 与内置工具重名", i, full)
+			}
+			if owner, ok := exposed[full]; ok {
+				return fmt.Errorf("上游工具名 %q 与 %s 重复", full, owner)
+			}
+			exposed[full] = u.Name
+			cleaned = append(cleaned, tool)
+		}
+		u.Tools = cleaned
+
+		if u.RefreshInterval <= 0 {
+			u.RefreshInterval = 10 * time.Minute
+		}
+		if u.Timeout <= 0 {
+			u.Timeout = 60 * time.Second
+		}
 	}
 	return nil
 }

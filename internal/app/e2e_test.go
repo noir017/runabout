@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -34,6 +35,7 @@ type harness struct {
 	workdir   string
 	token     string
 	sessionID string
+	auditPath string
 	reqID     int
 }
 
@@ -73,7 +75,7 @@ func newHarnessWith(t *testing.T, tweak func(*config.Config)) *harness {
 		srv.Close()
 		built.Close()
 	})
-	return &harness{t: t, srv: srv, base: base, workdir: workdir}
+	return &harness{t: t, srv: srv, base: base, workdir: workdir, auditPath: cfg.Audit.File}
 }
 
 func (h *harness) get(path string) (*http.Response, []byte) {
@@ -822,4 +824,240 @@ func TestAllowedTargetsE2E(t *testing.T) {
 	h.sessionID = ""
 	h.authorize()
 	checkRestricted("oauth-client")
+}
+
+// upstreamStub 是一个供 e2e 使用的假 MCP 上游，校验令牌与会话头，
+// 并在 tools/call 里返回一个 runabout 不认识的内容块与额外字段。
+type upstreamStub struct {
+	srv      *httptest.Server
+	token    string
+	mu       sync.Mutex
+	received []stubCall
+}
+
+type stubCall struct {
+	Name string
+	Args json.RawMessage
+	Auth string
+}
+
+func newUpstreamStub(t *testing.T, token string) *upstreamStub {
+	t.Helper()
+	s := &upstreamStub{token: token}
+	s.srv = httptest.NewServer(http.HandlerFunc(s.serve))
+	t.Cleanup(s.srv.Close)
+	return s
+}
+
+func (s *upstreamStub) serve(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Authorization") != "Bearer "+s.token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	body, _ := io.ReadAll(r.Body)
+	var req struct {
+		ID     *int64          `json:"id"`
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	var id any
+	if req.ID != nil {
+		id = *req.ID
+	}
+	write := func(result any) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+	}
+	writeErr := func(code int, msg string) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0", "id": id,
+			"error": map[string]any{"code": code, "message": msg},
+		})
+	}
+
+	switch req.Method {
+	case "initialize":
+		w.Header().Set("Mcp-Session-Id", "stub-session")
+		write(map[string]any{
+			"protocolVersion": "2025-06-18",
+			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"serverInfo":      map[string]any{"name": "stub", "version": "1"},
+		})
+	case "notifications/initialized":
+		w.WriteHeader(http.StatusAccepted)
+	case "tools/list":
+		if r.Header.Get("Mcp-Session-Id") != "stub-session" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		write(map[string]any{"tools": []any{
+			map[string]any{
+				"name": "echo", "title": "回显", "description": "上游回显工具",
+				"inputSchema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"msg": map[string]any{"type": "string"},
+					},
+					"required": []string{"msg"},
+				},
+			},
+			map[string]any{"name": "secret", "description": "未列入白名单", "inputSchema": map[string]any{"type": "object"}},
+		}})
+	case "tools/call":
+		if r.Header.Get("Mcp-Session-Id") != "stub-session" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var p struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		_ = json.Unmarshal(req.Params, &p)
+		s.mu.Lock()
+		s.received = append(s.received, stubCall{Name: p.Name, Args: p.Arguments, Auth: r.Header.Get("Authorization")})
+		s.mu.Unlock()
+		if p.Name != "echo" {
+			writeErr(-32602, "unknown tool "+p.Name)
+			return
+		}
+		write(map[string]any{
+			"content": []any{
+				map[string]any{"type": "text", "text": "upstream:" + string(p.Arguments)},
+				map[string]any{"type": "resource", "resource": map[string]any{"uri": "file:///demo", "text": "raw-block"}},
+			},
+			"custom": map[string]any{"kept": true},
+		})
+	default:
+		writeErr(-32601, "method not found")
+	}
+}
+
+func (s *upstreamStub) calls() []stubCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]stubCall(nil), s.received...)
+}
+
+func findTool(list map[string]any, name string) map[string]any {
+	for _, tl := range list["tools"].([]any) {
+		td := tl.(map[string]any)
+		if td["name"] == name {
+			return td
+		}
+	}
+	return nil
+}
+
+// TestUpstreamOverMCP 验证上游工具出现在 tools/list、调用被转发、结果原样返回，
+// 且白名单外的工具不会暴露。
+func TestUpstreamOverMCP(t *testing.T) {
+	stub := newUpstreamStub(t, "upstream-token")
+	t.Setenv("RB_TEST_UPSTREAM_TOKEN", "upstream-token")
+
+	h := newHarnessWith(t, func(cfg *config.Config) {
+		cfg.Upstreams = []config.Upstream{{
+			Name: "stub", URL: stub.srv.URL, TokenEnv: "RB_TEST_UPSTREAM_TOKEN",
+			Prefix: "up", Tools: []string{"echo"},
+			Timeout: 5 * time.Second, RefreshInterval: time.Hour,
+		}}
+	})
+	h.authorize()
+	h.rpc("initialize", map[string]any{"protocolVersion": "2025-06-18",
+		"clientInfo": map[string]any{"name": "t", "version": "1"}})
+
+	// 工具定义是后台异步拉取的，轮询到上游描述出现为止。
+	var def map[string]any
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		def = findTool(h.rpc("tools/list", nil), "up_echo")
+		if def != nil && def["description"] == "上游回显工具" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tools/list 里没有拿到上游定义: %+v", def)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if def["title"] != "回显" {
+		t.Errorf("title 应透传上游: %v", def["title"])
+	}
+	schema := def["inputSchema"].(map[string]any)
+	if _, ok := schema["properties"].(map[string]any)["msg"]; !ok {
+		t.Errorf("inputSchema 应来自上游: %v", schema)
+	}
+
+	list := h.rpc("tools/list", nil)
+	if findTool(list, "up_secret") != nil {
+		t.Error("白名单外的上游工具不应出现在 tools/list")
+	}
+
+	res := h.rpc("tools/call", map[string]any{
+		"name": "up_echo", "arguments": map[string]any{"msg": "hi"},
+	})
+	if isErr, _ := res["isError"].(bool); isErr {
+		t.Fatalf("上游调用失败: %v", res)
+	}
+	if _, ok := res["custom"]; !ok {
+		t.Errorf("结果应原样保留上游字段: %v", res)
+	}
+	blocks := res["content"].([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("内容块应原样返回，实际 %d 块", len(blocks))
+	}
+	if blocks[0].(map[string]any)["text"] != `upstream:{"msg":"hi"}` {
+		t.Errorf("参数没有原样转发: %v", blocks[0])
+	}
+	if blocks[1].(map[string]any)["type"] != "resource" {
+		t.Errorf("未知内容块应保留: %v", blocks[1])
+	}
+
+	calls := stub.calls()
+	if len(calls) != 1 || calls[0].Name != "echo" || calls[0].Auth != "Bearer upstream-token" {
+		t.Fatalf("上游没有收到正确的调用: %+v", calls)
+	}
+
+	// 透传调用与普通工具一样进审计日志。
+	raw, err := os.ReadFile(h.auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"tool":"up_echo"`) || !strings.Contains(string(raw), `"msg":"hi"`) {
+		t.Errorf("审计日志里没有透传调用记录:\n%s", raw)
+	}
+}
+
+// TestUpstreamUnreachableOverMCP 验证上游不可达时只影响对应工具。
+func TestUpstreamUnreachableOverMCP(t *testing.T) {
+	h := newHarnessWith(t, func(cfg *config.Config) {
+		cfg.Upstreams = []config.Upstream{{
+			Name: "dead", URL: "http://127.0.0.1:1/mcp", Prefix: "dead", Tools: []string{"echo"},
+			Timeout: 300 * time.Millisecond, RefreshInterval: time.Hour,
+		}}
+	})
+	h.authorize()
+	h.rpc("initialize", map[string]any{"protocolVersion": "2025-06-18",
+		"clientInfo": map[string]any{"name": "t", "version": "1"}})
+
+	def := findTool(h.rpc("tools/list", nil), "dead_echo")
+	if def == nil {
+		t.Fatal("上游不可达时白名单工具仍应出现在 tools/list")
+	}
+	if desc, _ := def["description"].(string); !strings.Contains(desc, "尚未取到") {
+		t.Errorf("不可达时应使用占位定义: %v", def)
+	}
+
+	out, isErr := h.callTool("dead_echo", map[string]any{"msg": "x"})
+	if !isErr || !strings.Contains(out, "上游 dead") {
+		t.Errorf("调用不可达的上游应返回工具错误: isErr=%v %s", isErr, out)
+	}
+
+	out, isErr = h.callTool("shell", map[string]any{"command": "echo still-alive"})
+	if isErr || !strings.Contains(out, "still-alive") {
+		t.Errorf("上游故障不应影响 runabout 自身工具: %s", out)
+	}
 }

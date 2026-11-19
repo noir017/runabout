@@ -15,6 +15,7 @@ import (
 	"github.com/noir017/runabout/internal/fleet"
 	"github.com/noir017/runabout/internal/mcp"
 	"github.com/noir017/runabout/internal/policy"
+	"github.com/noir017/runabout/internal/upstream"
 )
 
 // Deps 是所有工具共享的依赖。
@@ -26,7 +27,9 @@ type Deps struct {
 	Audit   *audit.Logger
 	Procs   *ProcManager
 	Fleet   *fleet.Fleet
-	Log     *slog.Logger
+	// Upstreams 是可选的上游 MCP 透传管理器；未配置 upstreams 时为 nil。
+	Upstreams *upstream.Manager
+	Log       *slog.Logger
 
 	localOnce  sync.Once
 	localFleet *fleet.Fleet
@@ -53,6 +56,7 @@ func All(d *Deps) []mcp.Handler {
 		candidates = append(candidates, &queryTool{d: d})
 	}
 	candidates = append(candidates, extensionTools(d)...)
+	candidates = append(candidates, upstreamTools(d)...)
 	out := make([]mcp.Handler, 0, len(candidates))
 	for _, h := range candidates {
 		if d.Cfg.IsToolDisabled(h.Definition().Name) {
