@@ -749,3 +749,77 @@ func TestReadOnlyAnnotationsOverMCP(t *testing.T) {
 		}
 	}
 }
+
+// TestAllowedTargetsE2E 验证静态令牌与 OAuth 客户端的 allowed_targets 白名单：
+// tools/list 仅暴露允许的 target，servers 仅探测允许的机器，越权调用被服务端强拒绝。
+func TestAllowedTargetsE2E(t *testing.T) {
+	stub := filepath.Join(t.TempDir(), "stub-ssh")
+	script := "#!/bin/sh\nfor last; do :; done\nexec sh -c \"$last\"\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarnessWith(t, func(cfg *config.Config) {
+		cfg.Fleet = config.Fleet{
+			SSHCommand:   []string{stub},
+			ProbeTimeout: 3 * time.Second,
+			Hosts: []config.FleetHost{
+				{Name: "web1", Desc: "测试机", SSH: "web1"},
+				{Name: "nas", Desc: "存储", Approval: true},
+			},
+		}
+		cfg.Auth.StaticTokens = append(cfg.Auth.StaticTokens, config.StaticToken{
+			Name:           "web-agent",
+			Token:          "tok-web1-only",
+			AllowedTargets: []string{"web1"},
+		})
+		cfg.Auth.ClientPolicies = append(cfg.Auth.ClientPolicies, config.ClientPolicy{
+			ClientName:     "测试客户端",
+			AllowedTargets: []string{"web1"},
+		})
+	})
+
+	checkRestricted := func(label string) {
+		t.Helper()
+		h.rpc("initialize", map[string]any{"protocolVersion": "2025-06-18",
+			"clientInfo": map[string]any{"name": "t", "version": "1"}})
+
+		list := h.rpc("tools/list", nil)
+		shell := toolDef(t, list, "shell")
+		tp := shell["inputSchema"].(map[string]any)["properties"].(map[string]any)["target"].(map[string]any)
+		enum := tp["enum"].([]any)
+		if len(enum) != 1 || enum[0] != "web1" {
+			t.Fatalf("[%s] shell target enum 应仅含 web1，实际 %v", label, enum)
+		}
+		servers := toolDef(t, list, "servers")
+		sDesc := servers["inputSchema"].(map[string]any)["properties"].(map[string]any)["target"].(map[string]any)["description"].(string)
+		if !strings.Contains(sDesc, "web1：测试机") || strings.Contains(sDesc, "nas：") || strings.Contains(sDesc, "local：") {
+			t.Fatalf("[%s] servers target 描述应仅暴露 web1，实际:\n%s", label, sDesc)
+		}
+
+		out, isErr := h.callTool("servers", nil)
+		if isErr || !strings.Contains(out, "[web1]") || strings.Contains(out, "[nas]") || strings.Contains(out, "[local]") {
+			t.Fatalf("[%s] servers 总览应仅含 web1，实际: %s", label, out)
+		}
+
+		out, isErr = h.callTool("shell", map[string]any{"target": "web1", "command": "echo ok-web1"})
+		if isErr || !strings.Contains(out, "ok-web1") {
+			t.Fatalf("[%s] 允许的 target web1 应成功: %s", label, out)
+		}
+
+		for _, badTarget := range []string{"nas", "local", ""} {
+			out, isErr = h.callTool("shell", map[string]any{"target": badTarget, "command": "echo nope"})
+			if !isErr || !strings.Contains(out, "无权访问") {
+				t.Errorf("[%s] 越权 target=%q 应被拒绝，实际 isErr=%v out=%s", label, badTarget, isErr, out)
+			}
+		}
+	}
+
+	// 1. 静态令牌限制
+	h.token = "tok-web1-only"
+	checkRestricted("static-token")
+
+	// 2. OAuth 客户端策略限制（e2e-test-client 来自 h.authorize()）
+	h.sessionID = ""
+	h.authorize()
+	checkRestricted("oauth-client")
+}

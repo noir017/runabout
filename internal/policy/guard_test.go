@@ -234,3 +234,42 @@ func TestConfirmStore(t *testing.T) {
 		t.Error("令牌应当一次性")
 	}
 }
+
+func TestDenyPathsAndRedirectBlocking(t *testing.T) {
+	cfg := config.Default()
+	cfg.Policy.DenyPaths = []string{"~/.fleetherd/web-bridge/**"}
+	cfg.Policy.TargetDenyPaths = map[string][]string{
+		"uniagent": {"/opt/private/token.json"},
+	}
+	g, err := NewShellGuard(cfg.Policy, []string{"runabout"})
+	if err != nil {
+		t.Fatalf("构造 guard 失败: %v", err)
+	}
+
+	denied := []string{
+		"cat ~/.fleetherd/web-bridge/abc12345.json",
+		"cat < ~/.fleetherd/web-bridge/abc12345.json",
+		"jq . < /home/user/.fleetherd/web-bridge/abc12345.json",
+		"while read line; do echo \"$line\"; done < ~/.fleetherd/web-bridge/abc12345.json",
+		"grep token /home/user/.fleetherd/web-bridge/abc12345.json",
+		"echo hack > ~/.fleetherd/web-bridge/abc12345.json",
+	}
+	for _, cmd := range denied {
+		if v := g.Inspect(cmd); v.Action != ActionDeny {
+			t.Errorf("%q 命中 deny_paths 应被拒绝，实际 %s\n%s", cmd, v.Action, v.Explain())
+		}
+	}
+
+	// 内置凭据路径的读重定向也应被拦截（confirm 级）。
+	if v := g.Inspect("cat < ~/.ssh/id_rsa"); v.Action != ActionConfirm {
+		t.Errorf("读重定向读取私钥应为 confirm，实际 %s", v.Action)
+	}
+
+	// target 专属 deny_paths 仅对该 target 生效。
+	if v := g.InspectForTarget("other", "cat /opt/private/token.json"); v.Action != ActionAllow {
+		t.Errorf("非目标机器不应拦截: %s", v.Action)
+	}
+	if v := g.InspectForTarget("uniagent", "cat /opt/private/token.json"); v.Action != ActionDeny {
+		t.Errorf("uniagent 应拒绝读取专属黑名单: %s", v.Action)
+	}
+}

@@ -30,6 +30,8 @@ type Client struct {
 	CreatedAt       time.Time `json:"created_at"`
 	// Dynamic 标记该客户端来自动态注册。
 	Dynamic bool `json:"dynamic"`
+	// AllowedTargets 限制该客户端可访问的 target 白名单；为空表示不限制。
+	AllowedTargets []string `json:"allowed_targets,omitempty"`
 }
 
 // AllowsRedirect 判断回调地址是否已登记。

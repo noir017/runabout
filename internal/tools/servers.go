@@ -38,11 +38,15 @@ if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then syst
 type serversTool struct {
 	d *Deps
 
-	mu       sync.Mutex
-	cachedAt time.Time
-	cached   []hostStatus
+	mu    sync.Mutex
+	cache map[string]cachedHost
 
 	now func() time.Time
+}
+
+type cachedHost struct {
+	at     time.Time
+	status hostStatus
 }
 
 type serversArgs struct {
@@ -61,6 +65,10 @@ type hostStatus struct {
 }
 
 func (t *serversTool) Definition() mcp.ToolDef {
+	return t.DefinitionFor(mcp.Principal{})
+}
+
+func (t *serversTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 	desc := `查看服务器状态。只读，可以随便调。
 
 不带 target：并行探测全部机器，给在线状态、负载、内存和根分区占用，结果缓存 30 秒。
@@ -71,7 +79,7 @@ func (t *serversTool) Definition() mcp.ToolDef {
 		Name:        "servers",
 		Title:       "查看服务器状态",
 		Description: desc,
-		InputSchema: schema(t.d.withTarget(map[string]any{})),
+		InputSchema: schema(t.d.withServersTargetFor(p, map[string]any{})),
 		Annotations: &mcp.ToolAnnotations{
 			Title:           "查看服务器状态",
 			ReadOnlyHint:    mcp.Ptr(true),
@@ -94,7 +102,7 @@ func (t *serversTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallT
 		return nil, mcp.Errorf(mcp.CodeInvalidParams, "%s", err.Error())
 	}
 	if strings.TrimSpace(a.Target) != "" {
-		target, err := t.d.resolveTarget(a.Target)
+		target, err := t.d.resolveTargetFor(cc.Principal, a.Target)
 		if err != nil {
 			return mcp.ToolError("%s", err.Error()), nil
 		}
@@ -104,29 +112,45 @@ func (t *serversTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallT
 }
 
 func (t *serversTool) overview(cc *mcp.CallContext) (*mcp.CallToolResult, error) {
+	hosts := t.d.allowedHosts(cc.Principal)
+	if len(hosts) == 0 {
+		return mcp.ToolError("当前凭据没有分配可访问的机器"), nil
+	}
 	now := t.clock()
+	statuses := make([]hostStatus, len(hosts))
+	needProbe := make([]int, 0, len(hosts))
+	allCached := true
 	t.mu.Lock()
-	if len(t.cached) > 0 && now.Sub(t.cachedAt) < 30*time.Second {
-		statuses := append([]hostStatus(nil), t.cached...)
-		t.mu.Unlock()
-		return t.renderOverview(statuses, true), nil
+	for i, h := range hosts {
+		if entry, ok := t.cache[h.Name]; ok && now.Sub(entry.at) < 30*time.Second {
+			statuses[i] = entry.status
+		} else {
+			allCached = false
+			needProbe = append(needProbe, i)
+		}
 	}
 	t.mu.Unlock()
+	if allCached {
+		return t.renderOverview(statuses, true), nil
+	}
 
-	hosts := t.d.fleetOrLocal().Hosts()
-	statuses := make([]hostStatus, len(hosts))
 	var wg sync.WaitGroup
-	for i, h := range hosts {
+	for _, idx := range needProbe {
 		wg.Add(1)
 		go func(i int, h fleet.Host) {
 			defer wg.Done()
 			statuses[i] = t.probeHost(cc.Ctx, h)
-		}(i, h)
+		}(idx, hosts[idx])
 	}
 	wg.Wait()
 
 	t.mu.Lock()
-	t.cached, t.cachedAt = append([]hostStatus(nil), statuses...), now
+	if t.cache == nil {
+		t.cache = map[string]cachedHost{}
+	}
+	for _, idx := range needProbe {
+		t.cache[hosts[idx].Name] = cachedHost{at: now, status: statuses[idx]}
+	}
 	t.mu.Unlock()
 	return t.renderOverview(statuses, false), nil
 }

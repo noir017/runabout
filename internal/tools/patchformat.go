@@ -25,6 +25,7 @@ const (
 	markBeginPatch = "*** Begin Patch"
 	markEndPatch   = "*** End Patch"
 	markAddFile    = "*** Add File:"
+	markCreateFile = "*** Create File:"
 	markUpdateFile = "*** Update File:"
 	markDeleteFile = "*** Delete File:"
 	markMoveTo     = "*** Move to:"
@@ -55,6 +56,7 @@ type patchOp struct {
 	path    string
 	moveTo  string
 	content string // kind==add 时的完整文件内容
+	rawAdd  bool   // Create File 模式：免 + 前缀，原样保留每行内容
 	hunks   []hunk
 }
 
@@ -131,6 +133,14 @@ func parsePatch(src string) ([]patchOp, error) {
 			addLines = nil
 			cur = &patchOp{kind: kindAdd, path: markerValue(trimmed, markAddFile)}
 
+		case strings.HasPrefix(trimmed, markCreateFile):
+			if cur != nil && cur.kind == kindAdd {
+				cur.content = joinAdd(addLines)
+			}
+			flushOp()
+			addLines = nil
+			cur = &patchOp{kind: kindAdd, rawAdd: true, path: markerValue(trimmed, markCreateFile)}
+
 		case strings.HasPrefix(trimmed, markDeleteFile):
 			if cur != nil && cur.kind == kindAdd {
 				cur.content = joinAdd(addLines)
@@ -164,7 +174,11 @@ func parsePatch(src string) ([]patchOp, error) {
 			}
 			switch cur.kind {
 			case kindAdd:
-				addLines = append(addLines, strings.TrimPrefix(line, "+"))
+				if cur.rawAdd {
+					addLines = append(addLines, line)
+				} else {
+					addLines = append(addLines, strings.TrimPrefix(line, "+"))
+				}
 			case kindUpdate:
 				if curHunk == nil {
 					// 没写 @@ 就直接给差异行：补一个匿名 hunk。
@@ -215,7 +229,8 @@ func markerValue(line, marker string) string {
 
 func isFileMarker(line string) bool {
 	t := strings.TrimSpace(line)
-	return strings.HasPrefix(t, markAddFile) || strings.HasPrefix(t, markUpdateFile) ||
+	return strings.HasPrefix(t, markAddFile) || strings.HasPrefix(t, markCreateFile) ||
+		strings.HasPrefix(t, markUpdateFile) ||
 		strings.HasPrefix(t, markDeleteFile)
 }
 
@@ -298,11 +313,15 @@ func applyHunks(original string, hunks []hunk) (string, []string, error) {
 
 		start, how := findBlock(lines, expected, searchFrom, h.atEOF)
 		if start < 0 {
+			actualSnippet := closestContextSnippet(lines, expected, h.header, searchFrom)
+			if actualSnippet != "" {
+				actualSnippet = "\n" + actualSnippet + "\n"
+			}
 			return "", notes, fmt.Errorf("第 %d 个 @@ 块的上下文在文件里找不到。\n"+
-				"期望匹配的内容（前 5 行）：\n%s\n"+
+				"期望匹配的内容（前 5 行）：\n%s\n%s"+
 				"请先用 read 看一眼这段的当前内容，再按实际文本重新生成补丁；"+
 				"注意上下文行要一字不差（含缩进）",
-				hi+1, indentLines(firstN(expected, 5), "  | "))
+				hi+1, indentLines(firstN(expected, 5), "  | "), actualSnippet)
 		}
 		if how != "exact" {
 			notes = append(notes, fmt.Sprintf("第 %d 块以%s方式匹配（文件里的空白与补丁不完全一致）", hi+1, how))
@@ -412,6 +431,83 @@ func indentLines(lines []string, prefix string) string {
 		}
 		sb.WriteString(prefix)
 		sb.WriteString(l)
+	}
+	return sb.String()
+}
+
+// closestContextSnippet 在匹配失败时定位文件里最接近的锚点行，回显实际 5–10 行上下文（带 1-based 行号），
+// 减少模型为了核对上下文而额外调用一次 read 的轮次。
+func closestContextSnippet(lines, expected []string, header string, searchFrom int) string {
+	if len(lines) == 0 {
+		return "文件当前为空。"
+	}
+	anchor := -1
+	bestScore := 0
+
+	// 收集 expected 里的非空特征行，对每个可能起点打分。
+	var probes []struct {
+		offset int
+		trim   string
+	}
+	for k, e := range expected {
+		if t := strings.TrimSpace(e); t != "" {
+			probes = append(probes, struct {
+				offset int
+				trim   string
+			}{offset: k, trim: t})
+		}
+	}
+	if len(probes) > 0 {
+		for i := 0; i < len(lines); i++ {
+			score := 0
+			for _, pr := range probes {
+				idx := i + pr.offset
+				if idx >= len(lines) {
+					break
+				}
+				lt := strings.TrimSpace(lines[idx])
+				if lt == pr.trim {
+					score += 4
+				} else if len(pr.trim) >= 4 && (strings.Contains(lt, pr.trim) || strings.Contains(pr.trim, lt)) {
+					score += 1
+				}
+			}
+			if score > bestScore {
+				bestScore = score
+				anchor = i
+			}
+		}
+	}
+
+	if anchor < 0 && header != "" {
+		if idx := findHeader(lines, header, searchFrom); idx >= 0 {
+			anchor = idx
+		}
+	}
+	if anchor < 0 {
+		if searchFrom >= 0 && searchFrom < len(lines) {
+			anchor = searchFrom
+		} else {
+			anchor = 0
+		}
+	}
+
+	from := anchor - 2
+	if from < 0 {
+		from = 0
+	}
+	to := from + 10
+	if to > len(lines) {
+		to = len(lines)
+		if to-8 > 0 && to-from < 8 {
+			from = to - 8
+		}
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "文件最接近位置的实际内容（第 %d-%d 行）：", from+1, to)
+	for i := from; i < to; i++ {
+		fmt.Fprintf(&sb, "\n%4d\t%s", i+1, lines[i])
 	}
 	return sb.String()
 }

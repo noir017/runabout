@@ -18,9 +18,10 @@ type PathGuard struct {
 	home string
 	// baseDir 是相对路径的解析基准。必须和 shell 工具的默认工作目录一致，
 	// 否则同一个 "src/main.go" 在 read 和 shell 里会指向两个不同的文件。
-	baseDir   string
-	writeDeny []string
-	readDeny  []string
+	baseDir    string
+	writeDeny  []string
+	readDeny   []string
+	targetDeny map[string][]string
 }
 
 // NewPathGuard 构造路径守卫。baseDir 为空时回落到进程当前目录。
@@ -30,19 +31,63 @@ func NewPathGuard(p config.Policy, baseDir string) *PathGuard {
 		baseDir, _ = os.Getwd()
 	}
 	g := &PathGuard{home: home, baseDir: baseDir}
-	g.writeDeny = normalizePatterns(p.WriteDenyPaths, home)
-	g.readDeny = normalizePatterns(p.ReadDenyPaths, home)
+	extra := normalizePatterns(p.DenyPaths, home)
+	g.writeDeny = append(normalizePatterns(p.WriteDenyPaths, home), extra...)
+	g.readDeny = append(normalizePatterns(p.ReadDenyPaths, home), extra...)
+	if len(p.TargetDenyPaths) > 0 {
+		g.targetDeny = make(map[string][]string, len(p.TargetDenyPaths))
+		for tgt, pats := range p.TargetDenyPaths {
+			tgt = strings.TrimSpace(tgt)
+			if tgt == "" {
+				continue
+			}
+			if norm := normalizePatterns(pats, home); len(norm) > 0 {
+				g.targetDeny[tgt] = append(g.targetDeny[tgt], norm...)
+			}
+		}
+	}
 	return g
+}
+
+// ForTarget 返回叠加了指定 target 专属黑名单的路径守卫视图。
+func (g *PathGuard) ForTarget(target string) *PathGuard {
+	if g == nil || target == "" || len(g.targetDeny) == 0 {
+		return g
+	}
+	extra := g.targetDeny[target]
+	if len(extra) == 0 {
+		return g
+	}
+	cp := &PathGuard{
+		home:      g.home,
+		baseDir:   g.baseDir,
+		writeDeny: append(append([]string(nil), g.writeDeny...), extra...),
+		readDeny:  append(append([]string(nil), g.readDeny...), extra...),
+	}
+	return cp
 }
 
 func normalizePatterns(pats []string, home string) []string {
 	out := make([]string, 0, len(pats))
+	seen := map[string]bool{}
+	add := func(v string) {
+		if v == "" || seen[v] {
+			return
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
 	for _, p := range pats {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
 		}
-		out = append(out, ExpandHome(p, home))
+		add(ExpandHome(p, home))
+		// ~/... 形式在远端机器上家目录可能与本机不同，同时保留字面 ~/ 与 **/ 变体。
+		if strings.HasPrefix(p, "~/") {
+			add(p)
+			add("**/" + strings.TrimPrefix(p, "~/"))
+		}
 	}
 	return out
 }
@@ -157,6 +202,24 @@ func (g *PathGuard) CheckWriteLiteral(path string) (string, error) {
 		return "", &DeniedError{Path: clean, Pattern: pat, Mode: "write"}
 	}
 	return clean, nil
+}
+
+// IsReadDenied 报告本机路径是否命中读黑名单（用于 search/glob 过滤结果）。
+func (g *PathGuard) IsReadDenied(path string) bool {
+	if g == nil || strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := g.CheckRead(path)
+	return err != nil
+}
+
+// IsReadDeniedLiteral 报告远端字面路径是否命中读黑名单。
+func (g *PathGuard) IsReadDeniedLiteral(path string) bool {
+	if g == nil || strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := g.CheckReadLiteral(path)
+	return err != nil
 }
 
 // matchPath 同时用解析后的绝对路径和原始输入去匹配，避免软链接解析把

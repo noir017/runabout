@@ -63,9 +63,17 @@ auth:
 
   # 绕过 OAuth 的长期令牌，方便 curl 自检或别的 agent 直连。
   # 用 `runabout gen-token` 生成。不需要就留空。
+  # 可选配置 allowed_targets 限制该令牌仅能访问指定机器（留空表示不限制）。
   static_tokens: []
   #  - name: "curl-debug"
   #    token: "……"
+  #    allowed_targets: ["uniagent"]
+
+  # 可选：按 OAuth client_id 或 client_name 限制客户端可访问的 target 白名单。
+  # 留空表示不限制；配置后 tools/list、servers 与工具调用均只暴露并放行白名单机器。
+  client_policies: []
+  #  - client_name: "gemini-web-task"
+  #    allowed_targets: ["uniagent"]
 
 tools:
   # 想下线某些工具就填名字，例如 ["write"] 只保留 apply_patch 改文件。
@@ -142,6 +150,7 @@ fleet:
   #    ssh: web1              # 不写就与 name 相同
   #    workdir: /srv/app      # 不写就是远端登录用户的家目录
   #    approval: false
+  #    deny_paths: []         # 可选：仅对该机器生效的额外敏感路径黑名单
   #  - name: nas
   #    desc: 家庭 NAS / 容器主力
   #    approval: true
@@ -175,6 +184,17 @@ policy:
     - "**/.docker/config.json"
     - "**/.kube/config"
     - "**/.netrc"
+    - "**/.fleetherd/web-bridge/**"
+
+  # 全局追加的敏感路径黑名单（glob，支持 ** 与 ~），与内置规则做并集合并，不会覆盖默认规则。
+  # 同时作用于 read / apply_patch / search / glob 以及 shell 的读/写重定向检查（命中即硬拒绝）。
+  deny_paths:
+    - "~/.fleetherd/web-bridge/**"
+
+  # 可选：按 target 机器名追加的敏感路径黑名单。
+  target_deny_paths: {}
+  #  uniagent:
+  #    - "~/.ant-browser/cookies/**"
 
   # 按 id 关掉内置 shell 规则（用 `runabout check-policy` 看 id）。
   disabled_shell_rules: []
@@ -199,3 +219,32 @@ audit:
   # 记录工具参数原文。关掉只留长度，隐私更好但排查更难。
   log_args: true
   max_args: 4000
+
+# 可选集成扩展工具（默认全部关闭，不改变对外暴露的核心工具集）。
+extensions:
+  # skill 工具（list | search | read）：桥接目标机器上 fleetherd 的 BM25 技能搜索与读取。
+  skill:
+    enabled: false
+    target: "local"
+    binary: "fleetherd"
+    timeout: 30s
+    max_output_bytes: 200000
+
+  # fleetherd_task 工具（agents | new | send | read | list | status）：
+  # 严格白名单 + argv 传参转发 task-* 子命令；带 session_ref 时仅在工具内部读取 web-bridge 映射。
+  fleetherd_task:
+    enabled: false
+    target: "local"
+    binary: "fleetherd"
+    web_bridge_dir: "~/.fleetherd/web-bridge"
+    # 可选：用于拼装返回结果里的 Web UI 直达链接。
+    web_ui_base_url: ""
+    # 可选：无 session_ref 手聊模式下创建空白顶层协调话题的命令模板（{title} 会替换为标题）。
+    empty_topic_command: []
+    #  - "fleetherd"
+    #  - "topic-new"
+    #  - "--empty"
+    #  - "--title"
+    #  - "{title}"
+    timeout: 60s
+    max_output_bytes: 200000

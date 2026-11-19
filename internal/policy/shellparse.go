@@ -84,19 +84,26 @@ func parseInto(sc *Script, src string, depth int, home string) {
 		if !ok {
 			return true
 		}
-		if _, ok := st.Cmd.(*syntax.CallExpr); !ok {
+		if _, ok := st.Cmd.(*syntax.CallExpr); ok {
+			c := buildCmd(st, src, depth, home)
+			if len(c.Argv) == 0 && len(c.Redirects) == 0 {
+				return true
+			}
+			sc.Cmds = append(sc.Cmds, c)
+			// bash -c "..." / ssh host "..." 里的命令同样要过一遍规则，
+			// 否则一层引号就能绕过所有拦截。
+			if depth < maxNestedParse {
+				for _, nested := range nestedScripts(c) {
+					parseInto(sc, nested, depth+1, home)
+				}
+			}
 			return true
 		}
-		c := buildCmd(st, src, depth, home)
-		if len(c.Argv) == 0 && len(c.Redirects) == 0 {
-			return true
-		}
-		sc.Cmds = append(sc.Cmds, c)
-		// bash -c "..." / ssh host "..." 里的命令同样要过一遍规则，
-		// 否则一层引号就能绕过所有拦截。
-		if depth < maxNestedParse {
-			for _, nested := range nestedScripts(c) {
-				parseInto(sc, nested, depth+1, home)
+		// 复合语句（如 while read ...; done < secret）或纯重定向语句同样可能带文件重定向。
+		if len(st.Redirs) > 0 {
+			c := buildCmd(st, src, depth, home)
+			if len(c.Redirects) > 0 {
+				sc.Cmds = append(sc.Cmds, c)
 			}
 		}
 		return true

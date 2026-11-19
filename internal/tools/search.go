@@ -18,6 +18,7 @@ import (
 	"github.com/noir017/runabout/internal/fleet"
 	"github.com/noir017/runabout/internal/globmatch"
 	"github.com/noir017/runabout/internal/mcp"
+	"github.com/noir017/runabout/internal/policy"
 )
 
 type searchTool struct{ d *Deps }
@@ -36,6 +37,10 @@ type searchArgs struct {
 }
 
 func (t *searchTool) Definition() mcp.ToolDef {
+	return t.DefinitionFor(mcp.Principal{})
+}
+
+func (t *searchTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 	engine := "内置 Go 实现"
 	if t.ripgrep() != "" {
 		engine = "ripgrep（尊重 .gitignore）"
@@ -57,7 +62,7 @@ func (t *searchTool) Definition() mcp.ToolDef {
 - 默认最多返回 %d 条，超出会提示收窄条件。
 - 默认跳过 .git、node_modules、vendor 等目录；hidden=true 时也搜隐藏文件。%s`,
 			engine, t.d.Cfg.Tools.Search.MaxResults, remoteDoc),
-		InputSchema: schema(t.d.withTarget(map[string]any{
+		InputSchema: schema(t.d.withTargetFor(p, map[string]any{
 			"pattern":          strProp("正则表达式（或 literal=true 时的字面量）"),
 			"path":             strProp("搜索起点，目录或文件"),
 			"glob":             strProp("文件名过滤，如 *.go；! 开头表示排除"),
@@ -98,7 +103,7 @@ func (t *searchTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTo
 	if strings.TrimSpace(a.Pattern) == "" {
 		return mcp.ToolError("pattern 不能为空"), nil
 	}
-	target, err := t.d.resolveTarget(a.Target)
+	target, err := t.d.resolveTargetFor(cc.Principal, a.Target)
 	if err != nil {
 		return mcp.ToolError("%s", err.Error()), nil
 	}
@@ -122,7 +127,7 @@ func (t *searchTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTo
 		return mcp.ToolError("%s", err.Error()), nil
 	}
 	if target.remote {
-		return t.searchRemote(cc.Ctx, target, a, abs, max)
+		return t.searchRemote(cc.Ctx, target, guard, a, abs, max)
 	}
 	if _, err := os.Stat(abs); err != nil {
 		return mcp.ToolError("搜索起点 %s 不可用: %v", abs, err), nil
@@ -132,17 +137,17 @@ func (t *searchTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTo
 	defer cancel()
 
 	if rg := t.ripgrep(); rg != "" {
-		res, err := t.searchWithRipgrep(ctx, target, rg, a, abs, max)
+		res, err := t.searchWithRipgrep(ctx, target, guard, rg, a, abs, max)
 		if err == nil {
 			return res, nil
 		}
 		// rg 失败（未安装、参数不兼容）时静默回退，不让用户感知实现细节。
 		t.d.Log.Warn("ripgrep 调用失败，回退内置搜索", "err", err)
 	}
-	return t.searchNative(ctx, target, a, abs, max)
+	return t.searchNative(ctx, target, guard, a, abs, max)
 }
 
-func (t *searchTool) searchWithRipgrep(ctx context.Context, target targetInfo, rg string, a searchArgs, root string, max int) (*mcp.CallToolResult, error) {
+func (t *searchTool) searchWithRipgrep(ctx context.Context, target targetInfo, guard *policy.PathGuard, rg string, a searchArgs, root string, max int) (*mcp.CallToolResult, error) {
 	args := []string{"--line-number", "--no-heading", "--color", "never", "--with-filename"}
 	if a.Literal {
 		args = append(args, "--fixed-strings")
@@ -185,10 +190,14 @@ func (t *searchTool) searchWithRipgrep(ctx context.Context, target targetInfo, r
 	if err != nil {
 		return nil, fmt.Errorf("%v: %s", err, truncate(errOut.String(), 300))
 	}
-	return t.formatMatches(target, a, root, splitNonEmpty(out.String()), max, "ripgrep"), nil
+	lines := filterDeniedSearchLines(splitNonEmpty(out.String()), a.FilesOnly, guard.IsReadDenied)
+	if len(lines) == 0 {
+		return t.emptyResult(target, a, root, "ripgrep"), nil
+	}
+	return t.formatMatches(target, a, root, lines, max, "ripgrep"), nil
 }
 
-func (t *searchTool) searchNative(ctx context.Context, target targetInfo, a searchArgs, root string, max int) (*mcp.CallToolResult, error) {
+func (t *searchTool) searchNative(ctx context.Context, target targetInfo, guard *policy.PathGuard, a searchArgs, root string, max int) (*mcp.CallToolResult, error) {
 	expr := a.Pattern
 	if a.Literal {
 		expr = regexp.QuoteMeta(expr)
@@ -224,9 +233,15 @@ func (t *searchTool) searchNative(ctx context.Context, target targetInfo, a sear
 			if path != root && (ignore[name] && !a.Hidden || (!a.Hidden && strings.HasPrefix(name, "."))) {
 				return filepath.SkipDir
 			}
+			if path != root && guard.IsReadDenied(path) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !a.Hidden && strings.HasPrefix(name, ".") {
+			return nil
+		}
+		if guard.IsReadDenied(path) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
@@ -389,7 +404,7 @@ func (t *searchTool) formatMatches(target targetInfo, a searchArgs, root string,
 	return mcp.Text(sb.String()).WithStructured(meta)
 }
 
-func (t *searchTool) searchRemote(ctx context.Context, target targetInfo, a searchArgs, root string, max int) (*mcp.CallToolResult, error) {
+func (t *searchTool) searchRemote(ctx context.Context, target targetInfo, guard *policy.PathGuard, a searchArgs, root string, max int) (*mcp.CallToolResult, error) {
 	timeout := t.d.Cfg.Tools.Search.Timeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -428,10 +443,38 @@ func (t *searchTool) searchRemote(ctx context.Context, target targetInfo, a sear
 		}
 		return mcp.ToolError("%s搜索失败：%s", label(target), msg), nil
 	}
+	lines = filterDeniedSearchLines(lines, a.FilesOnly, guard.IsReadDeniedLiteral)
 	if len(lines) == 0 {
 		return t.emptyResult(target, a, root, engine), nil
 	}
 	return t.formatMatches(target, a, root, lines, max, engine), nil
+}
+
+var searchLinePathRE = regexp.MustCompile(`^(.+?)[:\-]\d+[:\-]`)
+
+// filterDeniedSearchLines 剔除命中的黑名单文件路径，避免从父目录搜索时绕过敏感路径限制。
+func filterDeniedSearchLines(lines []string, filesOnly bool, denied func(string) bool) []string {
+	if len(lines) == 0 || denied == nil {
+		return lines
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line == "--" {
+			out = append(out, line)
+			continue
+		}
+		p := line
+		if !filesOnly {
+			if m := searchLinePathRE.FindStringSubmatch(line); m != nil {
+				p = m[1]
+			}
+		}
+		if denied(p) {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 // remoteSearchScript 优先 rg，没有就退回 grep；第一行用标记告诉调用方实际用了哪个。

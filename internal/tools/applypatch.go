@@ -23,6 +23,10 @@ type applyPatchArgs struct {
 }
 
 func (t *applyPatchTool) Definition() mcp.ToolDef {
+	return t.DefinitionFor(mcp.Principal{})
+}
+
+func (t *applyPatchTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 	targetDoc := ""
 	if t.d.fleetEnabled() {
 		targetDoc = "\n- 远端文件同样先全部取回、在本地算完补丁，全部通过后才逐个写回；" +
@@ -49,13 +53,14 @@ func (t *applyPatchTool) Definition() mcp.ToolDef {
 
 规则：
 - 每行前缀：空格=上下文（保持不变）、"-"=删除、"+"=新增。上下文行必须与文件里现有内容一字不差（含缩进）。
+- 新建较大文件可用 "*** Create File: 路径"（免每行 "+" 前缀，原样写入）；仅允许目标文件不存在时写入，避免误覆盖。
 - @@ 后面可以跟一段就近的代码（如函数签名）帮助定位，也可以留空。
 - 一个 Update File 段落里可以有多个 @@ 块；一个补丁里可以同时改多个文件。
 - 需要重命名：在 Update File 下一行写 *** Move to: 新路径。
 - 改动前建议先 read 目标区域，确保上下文抄得准确。
 - dry_run=true 只校验补丁能不能套上，不实际写盘。
 - 全部文件要么一起成功、要么一起不动：任何一个文件套不上，整个补丁都不会落盘。` + targetDoc,
-		InputSchema: schema(t.d.withTarget(map[string]any{
+		InputSchema: schema(t.d.withTargetFor(p, map[string]any{
 			"patch":   strProp("完整的补丁文本，包含 *** Begin Patch / *** End Patch"),
 			"dry_run": boolProp("只校验不写入"),
 		}), "patch"),
@@ -84,7 +89,7 @@ func (t *applyPatchTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.Ca
 	if strings.TrimSpace(a.Patch) == "" {
 		return mcp.ToolError("patch 不能为空"), nil
 	}
-	target, err := t.d.resolveTarget(a.Target)
+	target, err := t.d.resolveTargetFor(cc.Principal, a.Target)
 	if err != nil {
 		return mcp.ToolError("%s", err.Error()), nil
 	}

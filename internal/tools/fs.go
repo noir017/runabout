@@ -29,6 +29,10 @@ type readArgs struct {
 }
 
 func (t *readTool) Definition() mcp.ToolDef {
+	return t.DefinitionFor(mcp.Principal{})
+}
+
+func (t *readTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 	fs := t.d.Cfg.Tools.FS
 	remoteDoc := ""
 	if t.d.fleetEnabled() {
@@ -47,7 +51,7 @@ func (t *readTool) Definition() mcp.ToolDef {
 - 其他二进制文件会被拒绝，请改用 shell 里的 xxd/file。
 - 少数凭据类文件（私钥、云凭据等）被策略禁止读取，会返回明确错误。`,
 			fs.DefaultLines, fs.MaxLineChars, fs.ImageMaxEdge, humanBytes(int64(fs.MaxImageBytes)), remoteDoc),
-		InputSchema: schema(t.d.withTarget(map[string]any{
+		InputSchema: schema(t.d.withTargetFor(p, map[string]any{
 			"path":   strProp("文件路径，绝对或相对（相对于默认工作目录）"),
 			"offset": intProp("起始行号，从 1 开始", 1, 0),
 			"limit":  intProp("最多读取多少行", 1, 0),
@@ -66,7 +70,7 @@ func (t *readTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 	if err := decodeArgs(raw, &a); err != nil {
 		return nil, mcp.Errorf(mcp.CodeInvalidParams, "%s", err.Error())
 	}
-	target, err := t.d.resolveTarget(a.Target)
+	target, err := t.d.resolveTargetFor(cc.Principal, a.Target)
 	if err != nil {
 		return mcp.ToolError("%s", err.Error()), nil
 	}

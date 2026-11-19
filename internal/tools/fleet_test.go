@@ -498,8 +498,18 @@ func TestTargetParamIsSimpleEnum(t *testing.T) {
 	if _, bad := tp["oneOf"]; bad {
 		t.Error("不能用 oneOf")
 	}
-	if !strings.Contains(tp["description"].(string), "local：") {
-		t.Errorf("参数描述应每台机器一行: %v", tp["description"])
+	desc := tp["description"].(string)
+	if !strings.Contains(desc, "servers") || strings.Contains(desc, "web1：") {
+		t.Errorf("非 servers 工具的 target 描述应精简指向 servers，不应重复机器列表: %v", desc)
+	}
+
+	// servers 工具应保留完整机器列表与用途描述。
+	sDef := (&serversTool{d: d}).Definition()
+	sProps := sDef.InputSchema.(map[string]any)["properties"].(map[string]any)
+	sTP := sProps["target"].(map[string]any)
+	sDesc := sTP["description"].(string)
+	if !strings.Contains(sDesc, "local：") || !strings.Contains(sDesc, "web1：测试机") {
+		t.Errorf("servers 工具的 target 描述应保留完整机器列表: %v", sDesc)
 	}
 }
 

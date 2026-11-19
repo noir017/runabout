@@ -8,6 +8,7 @@ import (
 
 	"github.com/noir017/runabout/internal/config"
 	"github.com/noir017/runabout/internal/fleet"
+	"github.com/noir017/runabout/internal/mcp"
 	"github.com/noir017/runabout/internal/policy"
 )
 
@@ -32,9 +33,28 @@ func (d *Deps) fleetOrLocal() *fleet.Fleet {
 
 func (d *Deps) fleetEnabled() bool { return d.fleetOrLocal().Enabled() }
 
+// allowedHosts 返回指定身份允许访问的机群主机列表。
+func (d *Deps) allowedHosts(p mcp.Principal) []fleet.Host {
+	hosts := d.fleetOrLocal().Hosts()
+	if len(p.AllowedTargets) == 0 {
+		return hosts
+	}
+	out := make([]fleet.Host, 0, len(hosts))
+	for _, h := range hosts {
+		if p.AllowsTarget(h.Name) {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 // targetNames 是 target 的 enum，本机永远在第一位。
 func (d *Deps) targetNames() []string {
-	hosts := d.fleetOrLocal().Hosts()
+	return d.allowedTargetNames(mcp.Principal{})
+}
+
+func (d *Deps) allowedTargetNames(p mcp.Principal) []string {
+	hosts := d.allowedHosts(p)
 	names := make([]string, 0, len(hosts))
 	for _, h := range hosts {
 		names = append(names, h.Name)
@@ -42,13 +62,34 @@ func (d *Deps) targetNames() []string {
 	return names
 }
 
-// targetProp 生成 target 参数。单机模式返回 nil，schema 里就不会出现它。
+// targetProp 生成精简版 target 参数（保留 enum，机器用途统一指向 servers，节省每轮 schema token）。
+// 单机模式返回 nil，schema 里就不会出现它。
 func (d *Deps) targetProp() map[string]any {
+	return d.targetPropFor(mcp.Principal{})
+}
+
+func (d *Deps) targetPropFor(p mcp.Principal) map[string]any {
+	if !d.fleetEnabled() {
+		return nil
+	}
+	desc := "目标机器，默认 local；各机器用途与状态见 servers"
+	if !p.AllowsTarget(fleet.LocalTarget) {
+		desc = "目标机器；各机器用途与状态见 servers"
+	}
+	return map[string]any{
+		"type":        "string",
+		"enum":        d.allowedTargetNames(p),
+		"description": desc,
+	}
+}
+
+// serversTargetPropFor 生成 servers 工具专用的完整 target 参数，保留所有允许机器的用途说明。
+func (d *Deps) serversTargetPropFor(p mcp.Principal) map[string]any {
 	if !d.fleetEnabled() {
 		return nil
 	}
 	var lines []string
-	for _, h := range d.fleetOrLocal().Hosts() {
+	for _, h := range d.allowedHosts(p) {
 		line := h.Name + "：" + h.Desc
 		if h.Approval {
 			line += "【需审批】"
@@ -57,35 +98,58 @@ func (d *Deps) targetProp() map[string]any {
 	}
 	return map[string]any{
 		"type":        "string",
-		"enum":        d.targetNames(),
+		"enum":        d.allowedTargetNames(p),
 		"description": strings.Join(lines, "\n"),
 	}
 }
 
 // withTarget 在配置了机群时把 target 加进参数表。
 func (d *Deps) withTarget(props map[string]any) map[string]any {
-	if p := d.targetProp(); p != nil {
-		props["target"] = p
+	return d.withTargetFor(mcp.Principal{}, props)
+}
+
+func (d *Deps) withTargetFor(p mcp.Principal, props map[string]any) map[string]any {
+	if tp := d.targetPropFor(p); tp != nil {
+		props["target"] = tp
+	}
+	return props
+}
+
+func (d *Deps) withServersTargetFor(p mcp.Principal, props map[string]any) map[string]any {
+	if tp := d.serversTargetPropFor(p); tp != nil {
+		props["target"] = tp
 	}
 	return props
 }
 
 func (d *Deps) resolveTarget(name string) (targetInfo, error) {
+	return d.resolveTargetFor(mcp.Principal{}, name)
+}
+
+func (d *Deps) resolveTargetFor(p mcp.Principal, name string) (targetInfo, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = fleet.LocalTarget
 	}
 	h, ok := d.fleetOrLocal().Lookup(name)
 	if !ok {
-		return targetInfo{}, fmt.Errorf("未知的 target %q；可选：%s", name, strings.Join(d.targetNames(), "、"))
+		return targetInfo{}, fmt.Errorf("未知的 target %q；可选：%s", name, strings.Join(d.allowedTargetNames(p), "、"))
+	}
+	if !p.AllowsTarget(h.Name) {
+		allowed := d.allowedTargetNames(p)
+		if len(allowed) == 0 {
+			return targetInfo{}, fmt.Errorf("当前凭据无权访问 target %q（未分配可用机器）", h.Name)
+		}
+		return targetInfo{}, fmt.Errorf("当前凭据无权访问 target %q；允许的 target：%s", h.Name, strings.Join(allowed, "、"))
 	}
 	return targetInfo{name: h.Name, host: h, remote: !h.Local, labeled: d.fleetEnabled()}, nil
 }
 
 // fsFor 返回目标机器上的文件操作层与路径守卫。
 func (d *Deps) fsFor(t targetInfo) (fleet.FS, *policy.PathGuard) {
+	guard := d.Paths.ForTarget(t.name)
 	if !t.remote {
-		return fleet.LocalFS{}, d.Paths
+		return fleet.LocalFS{}, guard
 	}
 	limit := d.Cfg.Tools.FS.MaxReadBytes
 	if d.Cfg.Tools.FS.MaxImageBytes > limit {
@@ -94,7 +158,7 @@ func (d *Deps) fsFor(t targetInfo) (fleet.FS, *policy.PathGuard) {
 	if d.Cfg.Tools.FS.MaxImageSourceBytes > limit {
 		limit = d.Cfg.Tools.FS.MaxImageSourceBytes
 	}
-	return &fleet.RemoteFS{Runner: d.fleetOrLocal(), Target: t.name, MaxBytes: limit}, d.Paths
+	return &fleet.RemoteFS{Runner: d.fleetOrLocal(), Target: t.name, MaxBytes: limit}, guard
 }
 
 // remoteJoin 把相对路径接到 base 下。~ 开头的路径把 ~ 后面的部分锚定到根，

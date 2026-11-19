@@ -88,13 +88,22 @@ func checkReadOnlyAST(src string) error {
 // CheckReadOnly 在只读白名单之上再套一层现有 shell 规则：shell 里需要确认的
 // 命令不能走 query，否则 query 会成为绕开确认的通道（例如读取私钥）。
 func (g *ShellGuard) CheckReadOnly(command string) error {
+	return g.CheckReadOnlyForTarget("", command)
+}
+
+// CheckReadOnlyForTarget 按目标机器执行只读校验（叠加该 target 的专属 deny_paths）。
+func (g *ShellGuard) CheckReadOnlyForTarget(target, command string) error {
 	if err := CheckReadOnly(command); err != nil {
 		return err
 	}
+	g = g.forTarget(target)
 	script := ParseShell(command, g.home)
 	for _, c := range script.Cmds {
 		targets, _ := c.Targets()
 		for _, t := range targets {
+			if hit, ok := g.matchDenyPath(t); ok {
+				return fmt.Errorf("命令涉及敏感路径 %s（命中 %s），只读查询不允许", t, hit)
+			}
 			if hit, ok := g.matchSecret(t); ok {
 				return fmt.Errorf("命令涉及凭据类路径 %s（命中 %s），只读查询不允许", t, hit)
 			}
@@ -102,6 +111,9 @@ func (g *ShellGuard) CheckReadOnly(command string) error {
 		for _, r := range c.Redirects {
 			if r.Op != "<" {
 				continue
+			}
+			if hit, ok := g.matchDenyPath(r.Target); ok {
+				return fmt.Errorf("命令从敏感路径 %s 读取（命中 %s），只读查询不允许", r.Target, hit)
 			}
 			if hit, ok := g.matchSecret(r.Target); ok {
 				return fmt.Errorf("命令从凭据类路径 %s 读取（命中 %s），只读查询不允许", r.Target, hit)

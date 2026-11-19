@@ -52,6 +52,7 @@ func All(d *Deps) []mcp.Handler {
 	if d.Cfg.Tools.Query.Enabled {
 		candidates = append(candidates, &queryTool{d: d})
 	}
+	candidates = append(candidates, extensionTools(d)...)
 	out := make([]mcp.Handler, 0, len(candidates))
 	for _, h := range candidates {
 		if d.Cfg.IsToolDisabled(h.Definition().Name) {

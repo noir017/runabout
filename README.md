@@ -306,8 +306,10 @@ The most commonly changed settings are:
 | MCP tools | `tools.disabled` |
 | Shell execution | `tools.shell.default_workdir`, timeouts, `max_background`, `env` |
 | Fleet | `fleet.hosts`, `fleet.ssh_command`, `fleet.probe_timeout`, `fleet.approval_check` |
-| File access | `policy.write_deny_paths`, `policy.read_deny_paths` |
+| Target scoping | `auth.static_tokens[].allowed_targets`, `auth.client_policies` |
+| File access | `policy.write_deny_paths`, `policy.read_deny_paths`, `policy.deny_paths`, `policy.target_deny_paths` |
 | Shell policy | `policy.disabled_shell_rules`, `policy.downgrade_to_confirm`, `policy.extra_shell_rules` |
+| Extensions | `extensions.skill`, `extensions.fleetherd_task` (disabled by default) |
 | Audit | `audit.enabled`, `audit.log_args`, `audit.file` |
 | Source disclosure | `server.source_url` |
 
@@ -331,6 +333,13 @@ After changing policy rules:
 ```bash
 make test-policy
 ```
+
+### Optional extensions (`skill` & `fleetherd_task`)
+
+Optional integration tools live under `extensions` and are **disabled by default** so the core tool surface stays minimal. When enabled, they reuse the fleet execution channel, output truncation, timeouts, `allowed_targets` checks, and audit logging:
+
+- `extensions.skill`: exposes `skill` (`list | search | read`), bridging `fleetherd skills` (BM25 search and read) on the configured `target`.
+- `extensions.fleetherd_task`: exposes `fleetherd_task` (`agents | new | send | read | list | status`) with strict action whitelisting, argv-safe execution, internal `web-bridge` mapping resolution for `session_ref` (never logging or returning `FLEETHERD_TURN_TOKEN`), and optional `empty_topic_command` for blank coordination topics when `session_ref` is absent.
 
 ## CLI
 

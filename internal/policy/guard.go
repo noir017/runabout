@@ -70,6 +70,8 @@ type ShellGuard struct {
 	textRules   []textRule
 	extraRules  []compiledExtra
 	secretPaths []string
+	denyPaths   []string
+	targetDeny  map[string][]string
 	selfNames   []string
 	// downgrade 把内置 deny 规则降级为 confirm（按规则 id）。
 	downgrade map[string]bool
@@ -134,7 +136,34 @@ func NewShellGuard(p config.Policy, selfNames []string) (*ShellGuard, error) {
 
 	// 凭据路径直接复用 policy.read_deny_paths，两处不必各配一遍。
 	g.secretPaths = normalizePatterns(p.ReadDenyPaths, home)
+	g.denyPaths = normalizePatterns(p.DenyPaths, home)
+	if len(p.TargetDenyPaths) > 0 {
+		g.targetDeny = make(map[string][]string, len(p.TargetDenyPaths))
+		for tgt, pats := range p.TargetDenyPaths {
+			tgt = strings.TrimSpace(tgt)
+			if tgt == "" {
+				continue
+			}
+			if norm := normalizePatterns(pats, home); len(norm) > 0 {
+				g.targetDeny[tgt] = append(g.targetDeny[tgt], norm...)
+			}
+		}
+	}
 	return g, nil
+}
+
+// forTarget 返回叠加了指定 target 专属 deny_paths 的守卫视图。
+func (g *ShellGuard) forTarget(target string) *ShellGuard {
+	if g == nil || target == "" || len(g.targetDeny) == 0 {
+		return g
+	}
+	extra := g.targetDeny[target]
+	if len(extra) == 0 {
+		return g
+	}
+	cp := *g
+	cp.denyPaths = append(append([]string(nil), g.denyPaths...), extra...)
+	return &cp
 }
 
 func (g *ShellGuard) matchSecret(target string) (string, bool) {
@@ -142,11 +171,34 @@ func (g *ShellGuard) matchSecret(target string) (string, bool) {
 	if t == "" {
 		return "", false
 	}
-	return globmatch.MatchAny(g.secretPaths, t)
+	if pat, ok := globmatch.MatchAny(g.secretPaths, t); ok {
+		return pat, true
+	}
+	return globmatch.MatchAny(g.secretPaths, strings.TrimSpace(target))
+}
+
+func (g *ShellGuard) matchDenyPath(target string) (string, bool) {
+	if len(g.denyPaths) == 0 {
+		return "", false
+	}
+	t := cleanTarget(target, g.home)
+	if t == "" {
+		return "", false
+	}
+	if pat, ok := globmatch.MatchAny(g.denyPaths, t); ok {
+		return pat, true
+	}
+	return globmatch.MatchAny(g.denyPaths, strings.TrimSpace(target))
 }
 
 // Inspect 审查一段 shell 命令。
 func (g *ShellGuard) Inspect(command string) Verdict {
+	return g.InspectForTarget("", command)
+}
+
+// InspectForTarget 按目标机器审查一段 shell 命令（叠加该 target 的专属 deny_paths）。
+func (g *ShellGuard) InspectForTarget(target, command string) Verdict {
+	g = g.forTarget(target)
 	v := Verdict{Action: ActionAllow}
 	script := ParseShell(command, g.home)
 	if script.ParseErr != nil {

@@ -29,6 +29,10 @@ type shellArgs struct {
 }
 
 func (t *shellTool) Definition() mcp.ToolDef {
+	return t.DefinitionFor(mcp.Principal{})
+}
+
+func (t *shellTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 	cfg := t.d.Cfg.Tools.Shell
 	targetDoc := ""
 	if t.d.fleetEnabled() {
@@ -59,7 +63,7 @@ func (t *shellTool) Definition() mcp.ToolDef {
   confirm_token，确认这确实是你要做的事之后，带着同一条命令和该 token 再调用一次即可执行。
   token 一次性、限时，且只对签发它的那条命令和目标机器有效。`,
 			targetDoc, cfg.Path, cfg.DefaultWorkdir, cfg.DefaultTimeout, cfg.MaxTimeout, cfg.MaxOutputBytes),
-		InputSchema: schema(t.d.withTarget(map[string]any{
+		InputSchema: schema(t.d.withTargetFor(p, map[string]any{
 			"command":           strProp("要执行的 bash 命令"),
 			"workdir":           strProp("工作目录，默认 " + cfg.DefaultWorkdir),
 			"timeout_ms":        intProp("超时毫秒数，默认 "+cfg.DefaultTimeout.String(), 100, int(cfg.MaxTimeout.Milliseconds())),
@@ -85,7 +89,7 @@ func (t *shellTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallToo
 	if strings.TrimSpace(a.Command) == "" {
 		return mcp.ToolError("command 不能为空"), nil
 	}
-	target, err := t.d.resolveTarget(a.Target)
+	target, err := t.d.resolveTargetFor(cc.Principal, a.Target)
 	if err != nil {
 		return mcp.ToolError("%s", err.Error()), nil
 	}
@@ -117,7 +121,7 @@ func (t *shellTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallToo
 
 // gate 执行策略判定与二次确认。返回非 nil 表示这次调用应当被拦下。
 func (t *shellTool) gate(cc *mcp.CallContext, target targetInfo, command, workdir, token string) *mcp.CallToolResult {
-	verdict := t.d.Shell.Inspect(command)
+	verdict := t.d.Shell.InspectForTarget(target.name, command)
 	fp := policy.Fingerprint("shell", target.name, command, workdir)
 
 	if token != "" {

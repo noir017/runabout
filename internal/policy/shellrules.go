@@ -320,14 +320,30 @@ func builtinCmdRules() []cmdRule {
 			hint: "私钥、云凭据、gh token 一旦进入对话就等于泄露给了模型服务方；" +
 				"如果只是要用密钥（git push、ssh），直接执行命令即可，不需要 cat 出来",
 			match: func(c *Cmd, g *ShellGuard) (Action, string) {
+				// 先检查读重定向（< / <>），无论命令名是什么都不能通过重定向读取敏感文件。
+				for _, r := range c.Redirects {
+					if r.Op != "<" && r.Op != "<>" {
+						continue
+					}
+					if hit, ok := g.matchDenyPath(r.Target); ok {
+						return ActionDeny, "重定向读取 " + r.Target + "（命中 " + hit + "）"
+					}
+					if hit, ok := g.matchSecret(r.Target); ok {
+						return ActionConfirm, "重定向读取 " + r.Target + "（命中 " + hit + "）"
+					}
+				}
 				readers := in(c.Name(), "cat", "bat", "less", "more", "head", "tail", "nl",
 					"base64", "xxd", "od", "strings", "openssl", "gpg", "cp", "scp", "rsync",
-					"tar", "zip", "curl", "wget", "python3", "python")
+					"tar", "zip", "curl", "wget", "python3", "python",
+					"jq", "awk", "sed", "grep", "rg", "perl", "ruby", "node")
 				if !readers {
 					return ActionAllow, ""
 				}
 				targets, _ := c.Targets()
 				for _, t := range targets {
+					if hit, ok := g.matchDenyPath(t); ok {
+						return ActionDeny, "涉及 " + t + "（命中 " + hit + "）"
+					}
 					if hit, ok := g.matchSecret(t); ok {
 						return ActionConfirm, "涉及 " + t + "（命中 " + hit + "）"
 					}
@@ -540,6 +556,9 @@ func builtinCmdRules() []cmdRule {
 					}
 					if isBlockDevice(r.Target) {
 						return ActionDeny, "重定向到块设备 " + r.Target
+					}
+					if hit, ok := g.matchDenyPath(r.Target); ok {
+						return ActionDeny, "重定向写入 " + r.Target + "（命中 " + hit + "）"
 					}
 					if isCriticalFile(r.Target, g.home) {
 						return ActionConfirm, "重定向覆盖 " + r.Target

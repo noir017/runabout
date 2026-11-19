@@ -26,6 +26,35 @@ type Config struct {
 	Fleet  Fleet  `yaml:"fleet"`
 	Policy Policy `yaml:"policy"`
 	Audit  Audit  `yaml:"audit"`
+	// Extensions 是默认关闭、按配置启用的可选集成扩展工具（如 skill、fleetherd_task）。
+	Extensions Extensions `yaml:"extensions,omitempty"`
+}
+
+// Extensions 控制可选扩展工具。所有扩展默认关闭，不改变默认工具列表。
+type Extensions struct {
+	Skill         SkillExtCfg         `yaml:"skill,omitempty"`
+	FleetherdTask FleetherdTaskExtCfg `yaml:"fleetherd_task,omitempty"`
+}
+
+// SkillExtCfg 配置 skill 扩展工具（桥接 fleetherd 的 BM25 技能搜索与读取）。
+type SkillExtCfg struct {
+	Enabled        bool          `yaml:"enabled"`
+	Target         string        `yaml:"target,omitempty"`
+	Binary         string        `yaml:"binary,omitempty"`
+	Timeout        time.Duration `yaml:"timeout,omitempty"`
+	MaxOutputBytes int           `yaml:"max_output_bytes,omitempty"`
+}
+
+// FleetherdTaskExtCfg 配置 fleetherd_task 扩展工具（受控转发 task-* 子命令）。
+type FleetherdTaskExtCfg struct {
+	Enabled           bool          `yaml:"enabled"`
+	Target            string        `yaml:"target,omitempty"`
+	Binary            string        `yaml:"binary,omitempty"`
+	WebBridgeDir      string        `yaml:"web_bridge_dir,omitempty"`
+	WebUIBaseURL      string        `yaml:"web_ui_base_url,omitempty"`
+	EmptyTopicCommand []string      `yaml:"empty_topic_command,omitempty"`
+	Timeout           time.Duration `yaml:"timeout,omitempty"`
+	MaxOutputBytes    int           `yaml:"max_output_bytes,omitempty"`
 }
 
 // Fleet 是可选的机群配置。不写 hosts 时保持单机模式：工具里不出现 target 参数。
@@ -51,6 +80,8 @@ type FleetHost struct {
 	// Approval 表示连接这台机器需要人工审批。runabout 不实现审批，
 	// 它只影响工具描述里的提示和 servers 总览是否主动去连。
 	Approval bool `yaml:"approval"`
+	// DenyPaths 追加仅针对这台机器生效的敏感路径黑名单（glob，支持 ** 与 ~）。
+	DenyPaths []string `yaml:"deny_paths,omitempty"`
 }
 
 type Server struct {
@@ -99,6 +130,8 @@ type Auth struct {
 	SessionCookieTTL  time.Duration `yaml:"session_cookie_ttl"`
 	// StaticTokens 是绕过 OAuth 的长期令牌，方便 curl 调试或别的 agent 直连。
 	StaticTokens []StaticToken `yaml:"static_tokens"`
+	// ClientPolicies 按 OAuth client_id 或 client_name 限制可访问的 target 白名单。
+	ClientPolicies []ClientPolicy `yaml:"client_policies,omitempty"`
 	// AllowUnauthenticatedInitialize 放行不带令牌的 initialize 握手（仅它一个）。
 	//
 	// 有些客户端在"验证这个 URL 是不是 MCP 服务器"的阶段会先裸发一次 initialize，
@@ -112,8 +145,16 @@ type Auth struct {
 }
 
 type StaticToken struct {
-	Name  string `yaml:"name"`
-	Token string `yaml:"token"`
+	Name           string   `yaml:"name"`
+	Token          string   `yaml:"token"`
+	AllowedTargets []string `yaml:"allowed_targets,omitempty"`
+}
+
+// ClientPolicy 为特定 OAuth 客户端配置 target 访问白名单。
+type ClientPolicy struct {
+	ClientID       string   `yaml:"client_id,omitempty"`
+	ClientName     string   `yaml:"client_name,omitempty"`
+	AllowedTargets []string `yaml:"allowed_targets,omitempty"`
 }
 
 type Tools struct {
@@ -189,6 +230,11 @@ type Policy struct {
 	WriteDenyPaths []string `yaml:"write_deny_paths"`
 	// ReadDenyPaths 命中即拒绝通过文件工具读取（凭据类文件）。
 	ReadDenyPaths []string `yaml:"read_deny_paths"`
+	// DenyPaths 全局追加的敏感路径黑名单（glob，支持 ** 与 ~），同时作用于读写与 shell 检查，
+	// 与内置规则做并集合并，不会覆盖默认黑名单。
+	DenyPaths []string `yaml:"deny_paths,omitempty"`
+	// TargetDenyPaths 按 target 机器名追加的敏感路径黑名单（键为 target 名，如 uniagent）。
+	TargetDenyPaths map[string][]string `yaml:"target_deny_paths,omitempty"`
 	// ExtraShellRules 追加到内置 shell 规则之后。
 	ExtraShellRules []ShellRule `yaml:"extra_shell_rules"`
 	// DisabledShellRules 按 id 关闭内置规则。
@@ -285,6 +331,7 @@ func Default() *Config {
 				"**/.ssh/igithub", "**/.ssh/gcp_key",
 				"**/.aws/credentials", "**/.config/gh/hosts.yml", "**/.docker/config.json",
 				"**/.kube/config", "**/.netrc",
+				"**/.fleetherd/web-bridge/**",
 			},
 		},
 		Audit: Audit{Enabled: true, LogArgs: true, MaxArgs: 4000},
@@ -397,6 +444,12 @@ func (c *Config) Normalize() error {
 	if err := c.normalizeFleet(); err != nil {
 		return err
 	}
+	if err := c.normalizeAuthPolicies(); err != nil {
+		return err
+	}
+	if err := c.normalizeExtensions(); err != nil {
+		return err
+	}
 	// 服务自身的数据目录永远不允许被文件工具改写，否则 agent 可以自签令牌。
 	c.Policy.WriteDenyPaths = append(c.Policy.WriteDenyPaths,
 		c.Server.DataDir, filepath.Join(c.Server.DataDir, "**"))
@@ -434,6 +487,120 @@ func (c *Config) normalizeFleet() error {
 		if strings.TrimSpace(h.SSH) == "" {
 			h.SSH = h.Name
 		}
+		if len(h.DenyPaths) > 0 {
+			if c.Policy.TargetDenyPaths == nil {
+				c.Policy.TargetDenyPaths = map[string][]string{}
+			}
+			c.Policy.TargetDenyPaths[h.Name] = append(c.Policy.TargetDenyPaths[h.Name], h.DenyPaths...)
+		}
+	}
+	return nil
+}
+
+// normalizeAuthPolicies 清理并校验静态令牌与 OAuth 客户端的 allowed_targets 白名单。
+func (c *Config) normalizeAuthPolicies() error {
+	known := map[string]bool{"local": true}
+	for _, h := range c.Fleet.Hosts {
+		known[h.Name] = true
+	}
+	cleanTargets := func(label string, list []string) ([]string, error) {
+		if len(list) == 0 {
+			return nil, nil
+		}
+		out := make([]string, 0, len(list))
+		seen := map[string]bool{}
+		for _, raw := range list {
+			t := strings.TrimSpace(raw)
+			if t == "" {
+				continue
+			}
+			if !known[t] {
+				return nil, fmt.Errorf("%s.allowed_targets 包含未知 target %q", label, t)
+			}
+			if !seen[t] {
+				seen[t] = true
+				out = append(out, t)
+			}
+		}
+		return out, nil
+	}
+	for i := range c.Auth.StaticTokens {
+		cleaned, err := cleanTargets(fmt.Sprintf("auth.static_tokens[%d]", i), c.Auth.StaticTokens[i].AllowedTargets)
+		if err != nil {
+			return err
+		}
+		c.Auth.StaticTokens[i].AllowedTargets = cleaned
+	}
+	for i := range c.Auth.ClientPolicies {
+		cp := &c.Auth.ClientPolicies[i]
+		cp.ClientID = strings.TrimSpace(cp.ClientID)
+		cp.ClientName = strings.TrimSpace(cp.ClientName)
+		if cp.ClientID == "" && cp.ClientName == "" {
+			return fmt.Errorf("auth.client_policies[%d] 至少要指定 client_id 或 client_name", i)
+		}
+		cleaned, err := cleanTargets(fmt.Sprintf("auth.client_policies[%d]", i), cp.AllowedTargets)
+		if err != nil {
+			return err
+		}
+		cp.AllowedTargets = cleaned
+	}
+	return nil
+}
+
+// normalizeExtensions 补齐扩展工具默认值，并在启用时校验目标机器与安全黑名单。
+func (c *Config) normalizeExtensions() error {
+	known := map[string]bool{"local": true}
+	for _, h := range c.Fleet.Hosts {
+		known[h.Name] = true
+	}
+
+	sk := &c.Extensions.Skill
+	sk.Target = strings.TrimSpace(sk.Target)
+	if sk.Target == "" {
+		sk.Target = "local"
+	}
+	sk.Binary = strings.TrimSpace(sk.Binary)
+	if sk.Binary == "" {
+		sk.Binary = "fleetherd"
+	}
+	if sk.Timeout <= 0 {
+		sk.Timeout = 30 * time.Second
+	}
+	if sk.MaxOutputBytes <= 0 {
+		sk.MaxOutputBytes = 200_000
+	}
+	if sk.Enabled && !known[sk.Target] {
+		return fmt.Errorf("extensions.skill.target 指向未知机器 %q", sk.Target)
+	}
+
+	ft := &c.Extensions.FleetherdTask
+	ft.Target = strings.TrimSpace(ft.Target)
+	if ft.Target == "" {
+		ft.Target = "local"
+	}
+	ft.Binary = strings.TrimSpace(ft.Binary)
+	if ft.Binary == "" {
+		ft.Binary = "fleetherd"
+	}
+	ft.WebBridgeDir = strings.TrimSpace(ft.WebBridgeDir)
+	if ft.WebBridgeDir == "" {
+		ft.WebBridgeDir = "~/.fleetherd/web-bridge"
+	}
+	ft.WebUIBaseURL = strings.TrimRight(strings.TrimSpace(ft.WebUIBaseURL), "/")
+	if ft.Timeout <= 0 {
+		ft.Timeout = 60 * time.Second
+	}
+	if ft.MaxOutputBytes <= 0 {
+		ft.MaxOutputBytes = 200_000
+	}
+	if ft.Enabled {
+		if !known[ft.Target] {
+			return fmt.Errorf("extensions.fleetherd_task.target 指向未知机器 %q", ft.Target)
+		}
+		// 安全不变量：启用 fleetherd_task 时强制将 web_bridge_dir 纳入全局 deny_paths，
+		// 防止模型通过 read / search / apply_patch / shell 重定向直读明文 token。
+		pat := strings.TrimRight(ft.WebBridgeDir, "/") + "/**"
+		c.Policy.DenyPaths = append(c.Policy.DenyPaths, pat)
 	}
 	return nil
 }

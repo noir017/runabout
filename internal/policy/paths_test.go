@@ -47,3 +47,38 @@ func TestCheckWriteLiteral(t *testing.T) {
 		t.Error("远端写私钥应被拒绝")
 	}
 }
+
+func TestDenyPathsConfigAndWebBridge(t *testing.T) {
+	cfg := config.Default()
+	cfg.Policy.DenyPaths = []string{"~/.fleetherd/web-bridge/**", "/srv/secrets/**"}
+	cfg.Policy.TargetDenyPaths = map[string][]string{
+		"uniagent": {"~/.ant-browser/cookies/**"},
+	}
+	g := NewPathGuard(cfg.Policy, "/work")
+
+	// 全局 deny_paths 对本机与远端字面路径、读写均生效，且保留内置规则。
+	for _, p := range []string{
+		"~/.fleetherd/web-bridge/abc12345.json",
+		"/home/user/.fleetherd/web-bridge/abc12345.json",
+		"/srv/secrets/token.txt",
+		"/etc/shadow",
+	} {
+		if _, err := g.CheckReadLiteral(p); err == nil {
+			t.Errorf("CheckReadLiteral(%s) 应被拒绝", p)
+		}
+		if _, err := g.CheckWriteLiteral(p); err == nil {
+			t.Errorf("CheckWriteLiteral(%s) 应被拒绝", p)
+		}
+	}
+
+	// target 专属 deny_paths 仅对该 target 生效。
+	if _, err := g.ForTarget("other").CheckReadLiteral("/home/user/.ant-browser/cookies/db"); err != nil {
+		t.Errorf("非目标机器不应命中 uniagent 专属黑名单: %v", err)
+	}
+	if _, err := g.ForTarget("uniagent").CheckReadLiteral("/home/user/.ant-browser/cookies/db"); err == nil {
+		t.Error("uniagent 应命中专属黑名单")
+	}
+	if !g.ForTarget("uniagent").IsReadDeniedLiteral("~/.ant-browser/cookies/db") {
+		t.Error("IsReadDeniedLiteral 应命中 ~/ 形式的专属黑名单")
+	}
+}

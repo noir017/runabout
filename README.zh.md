@@ -479,8 +479,10 @@ runabout version                  显示版本信息
 | 禁用工具 | `tools.disabled` |
 | Shell | `tools.shell.default_workdir`、timeout、`max_background`、`env` |
 | 机群 | `fleet.hosts`、`fleet.ssh_command`、`fleet.probe_timeout`、`fleet.approval_check` |
-| 文件访问 | `policy.write_deny_paths`、`policy.read_deny_paths` |
+| 目标白名单 | `auth.static_tokens[].allowed_targets`、`auth.client_policies` |
+| 文件访问 | `policy.write_deny_paths`、`policy.read_deny_paths`、`policy.deny_paths`、`policy.target_deny_paths` |
 | Shell 策略 | `policy.disabled_shell_rules`、`policy.downgrade_to_confirm`、`policy.extra_shell_rules` |
+| 可选扩展 | `extensions.skill`、`extensions.fleetherd_task`（默认关闭） |
 | 审计 | `audit.enabled`、`audit.log_args`、`audit.file` |
 | Source URL | `server.source_url` |
 
@@ -509,6 +511,13 @@ confirm
 ```bash
 make test-policy
 ```
+
+### 可选扩展工具（`skill` 与 `fleetherd_task`）
+
+集成类工具统一放在 `extensions` 配置区块下，**默认全部关闭**，不改变核心工具集。启用后复用 `fleet` 执行通道、输出截断、超时、`allowed_targets` 校验与审计日志：
+
+- `extensions.skill`：注册 `skill`（`list | search | read`），桥接目标机器上 `fleetherd skills` 的 BM25 检索与读取能力。
+- `extensions.fleetherd_task`：注册 `fleetherd_task`（严格白名单 `agents | new | send | read | list | status`），以 argv 安全传参调用 `fleetherd task-*`；带 `session_ref` 时仅在工具内部读取 `web-bridge` 映射并注入环境变量（明文 `FLEETHERD_TURN_TOKEN` 绝不落日志、绝不回显给模型），无 `session_ref` 时支持通过 `parent_topic` 或可配置的 `empty_topic_command` 挂载子任务。
 
 ## 架构
 

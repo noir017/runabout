@@ -19,6 +19,21 @@ type Principal struct {
 	ClientID string // OAuth 客户端 ID
 	TokenID  string
 	Method   string // oauth | static | disabled
+	// AllowedTargets 限制当前身份可访问的机群 target 白名单；为空表示不限制。
+	AllowedTargets []string
+}
+
+// AllowsTarget 报告当前身份是否允许访问指定的 target。
+func (p Principal) AllowsTarget(target string) bool {
+	if len(p.AllowedTargets) == 0 {
+		return true
+	}
+	for _, t := range p.AllowedTargets {
+		if t == target {
+			return true
+		}
+	}
+	return false
 }
 
 type principalKey struct{}
@@ -53,6 +68,12 @@ type CallContext struct {
 type Handler interface {
 	Definition() ToolDef
 	Call(cc *CallContext, args json.RawMessage) (*CallToolResult, error)
+}
+
+// ContextualHandler 允许工具按调用方身份动态生成工具定义（如按 allowed_targets 裁剪 target enum）。
+type ContextualHandler interface {
+	Handler
+	DefinitionFor(p Principal) ToolDef
 }
 
 // Auditor 接收工具调用审计事件。
@@ -159,7 +180,7 @@ func (s *Server) call(ctx context.Context, sessionID, protoVer string, msg *Mess
 		return map[string]any{}, nil
 
 	case "tools/list":
-		return s.handleListTools(), nil
+		return s.handleListTools(ctx), nil
 
 	case "tools/call":
 		return s.handleCallTool(ctx, sessionID, protoVer, msg.Params)
@@ -208,12 +229,17 @@ func negotiate(requested string) string {
 	return ProtocolLatest
 }
 
-func (s *Server) handleListTools() ListToolsResult {
+func (s *Server) handleListTools(ctx context.Context) ListToolsResult {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	p := PrincipalFromContext(ctx)
 	defs := make([]ToolDef, 0, len(s.tools))
 	for _, h := range s.tools {
-		defs = append(defs, h.Definition())
+		if ch, ok := h.(ContextualHandler); ok {
+			defs = append(defs, ch.DefinitionFor(p))
+		} else {
+			defs = append(defs, h.Definition())
+		}
 	}
 	sort.Slice(defs, func(i, j int) bool { return defs[i].Name < defs[j].Name })
 	return ListToolsResult{Tools: defs}

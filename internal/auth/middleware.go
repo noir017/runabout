@@ -54,7 +54,9 @@ func (s *Server) Protect(next http.Handler) http.Handler {
 		for _, st := range s.cfg.Auth.StaticTokens {
 			if st.Token != "" && subtle.ConstantTimeCompare([]byte(st.Token), []byte(raw)) == 1 {
 				next.ServeHTTP(w, mcp.RequestWithPrincipal(r, mcp.Principal{
-					Subject: orDefault(st.Name, "static"), Method: "static",
+					Subject:        orDefault(st.Name, "static"),
+					Method:         "static",
+					AllowedTargets: append([]string(nil), st.AllowedTargets...),
 				}))
 				return
 			}
@@ -74,9 +76,62 @@ func (s *Server) Protect(next http.Handler) http.Handler {
 			s.log.Warn("令牌的 resource 与本服务不一致", "token_resource", tok.Resource, "expected", s.base()+"/mcp")
 		}
 		next.ServeHTTP(w, mcp.RequestWithPrincipal(r, mcp.Principal{
-			Subject: tok.Subject, ClientID: tok.ClientID, TokenID: tok.Hash[:12], Method: "oauth",
+			Subject:        tok.Subject,
+			ClientID:       tok.ClientID,
+			TokenID:        tok.Hash[:12],
+			Method:         "oauth",
+			AllowedTargets: s.allowedTargetsForClient(tok.ClientID),
 		}))
 	})
+}
+
+// allowedTargetsForClient 解析 OAuth 客户端的 target 白名单。
+// 同时检查 store 中客户端自身的 allowed_targets 与配置里的 auth.client_policies；
+// 多条命中时取交集（最严格），均未配置时返回 nil（不限制）。
+func (s *Server) allowedTargetsForClient(clientID string) []string {
+	var client *Client
+	if clientID != "" {
+		client, _ = s.store.Client(clientID)
+	}
+	var result []string
+	hasRestriction := false
+	intersect := func(next []string) {
+		if len(next) == 0 {
+			return
+		}
+		if !hasRestriction {
+			hasRestriction = true
+			result = append([]string(nil), next...)
+			return
+		}
+		set := make(map[string]bool, len(next))
+		for _, t := range next {
+			set[t] = true
+		}
+		filtered := result[:0]
+		for _, t := range result {
+			if set[t] {
+				filtered = append(filtered, t)
+			}
+		}
+		result = filtered
+	}
+	if client != nil {
+		intersect(client.AllowedTargets)
+	}
+	for _, cp := range s.cfg.Auth.ClientPolicies {
+		if cp.ClientID != "" && cp.ClientID != clientID {
+			continue
+		}
+		if cp.ClientName != "" && (client == nil || client.Name != cp.ClientName) {
+			continue
+		}
+		intersect(cp.AllowedTargets)
+	}
+	if !hasRestriction {
+		return nil
+	}
+	return result
 }
 
 // isHandshake 判断请求体是不是 MCP 握手（initialize 或紧随其后的

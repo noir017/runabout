@@ -16,6 +16,7 @@ import (
 	"github.com/noir017/runabout/internal/fleet"
 	"github.com/noir017/runabout/internal/globmatch"
 	"github.com/noir017/runabout/internal/mcp"
+	"github.com/noir017/runabout/internal/policy"
 )
 
 type globTool struct{ d *Deps }
@@ -31,6 +32,10 @@ type globArgs struct {
 }
 
 func (t *globTool) Definition() mcp.ToolDef {
+	return t.DefinitionFor(mcp.Principal{})
+}
+
+func (t *globTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 	remoteDoc := ""
 	if t.d.fleetEnabled() {
 		remoteDoc = "\n- 远端机器有 rg 就用 rg，没有就退回 find，并在结果里注明。"
@@ -45,7 +50,7 @@ func (t *globTool) Definition() mcp.ToolDef {
 - path 指定搜索起点，默认当前工作目录。
 - 默认最多返回 %d 条，跳过 .git、node_modules 等目录。
 - 找内容用 search，找文件名用 glob。%s`, t.d.Cfg.Tools.Search.MaxGlobResult, remoteDoc),
-		InputSchema: schema(t.d.withTarget(map[string]any{
+		InputSchema: schema(t.d.withTargetFor(p, map[string]any{
 			"pattern":      strProp("文件名通配模式，如 **/*.go"),
 			"path":         strProp("搜索起点目录"),
 			"sort_by":      enumProp("排序方式，默认 mtime", "mtime", "path", "size"),
@@ -76,7 +81,7 @@ func (t *globTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 	if strings.TrimSpace(a.Pattern) == "" {
 		return mcp.ToolError("pattern 不能为空"), nil
 	}
-	target, err := t.d.resolveTarget(a.Target)
+	target, err := t.d.resolveTargetFor(cc.Principal, a.Target)
 	if err != nil {
 		return mcp.ToolError("%s", err.Error()), nil
 	}
@@ -99,7 +104,7 @@ func (t *globTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 		return mcp.ToolError("%s", err.Error()), nil
 	}
 	if target.remote {
-		return t.globRemote(cc.Ctx, target, a, abs, max)
+		return t.globRemote(cc.Ctx, target, guard, a, abs, max)
 	}
 	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
 		return mcp.ToolError("%s 不是可访问的目录", abs), nil
@@ -138,6 +143,12 @@ func (t *globTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 			return nil
 		}
 		if path == abs {
+			return nil
+		}
+		if guard.IsReadDenied(path) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -230,7 +241,7 @@ func globMatchLoose(pattern, rel, name string) bool {
 	return false
 }
 
-func (t *globTool) globRemote(ctx context.Context, target targetInfo, a globArgs, root string, max int) (*mcp.CallToolResult, error) {
+func (t *globTool) globRemote(ctx context.Context, target targetInfo, guard *policy.PathGuard, a globArgs, root string, max int) (*mcp.CallToolResult, error) {
 	timeout := t.d.Cfg.Tools.Search.Timeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -304,6 +315,9 @@ func (t *globTool) globRemote(ctx context.Context, target targetInfo, a globArgs
 			continue
 		}
 		p := parts[3]
+		if guard.IsReadDeniedLiteral(p) {
+			continue
+		}
 		if filter {
 			rel, relErr := filepath.Rel(expandedRoot, p)
 			if relErr != nil {
