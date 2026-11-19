@@ -114,11 +114,21 @@ type RemoteFS struct {
 }
 
 func (r *RemoteFS) run(ctx context.Context, command string, stdin string, maxOut int) (Result, error) {
+	return r.runMode(ctx, command, stdin, maxOut, false)
+}
+
+// runBinary 收集原始字节，不做 UTF-8 对齐；读文件内容必须走这里。
+func (r *RemoteFS) runBinary(ctx context.Context, command string, stdin string, maxOut int) (Result, error) {
+	return r.runMode(ctx, command, stdin, maxOut, true)
+}
+
+func (r *RemoteFS) runMode(ctx context.Context, command string, stdin string, maxOut int, binary bool) (Result, error) {
 	return r.Runner.Run(ctx, Spec{
 		Target:         r.Target,
 		Command:        command,
 		Stdin:          stdin,
 		MaxOutputBytes: maxOut,
+		Binary:         binary,
 	})
 }
 
@@ -157,7 +167,7 @@ func (r *RemoteFS) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	if limit <= 0 {
 		limit = 4 << 20
 	}
-	res, err := r.run(ctx, "cat -- "+QuotePath(path), "", limit+1)
+	res, err := r.runBinary(ctx, "cat -- "+QuotePath(path), "", limit+1)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +184,7 @@ func (r *RemoteFS) ReadHead(ctx context.Context, path string, n int) ([]byte, er
 	if n <= 0 {
 		return nil, nil
 	}
-	res, err := r.run(ctx, fmt.Sprintf("head -c %d -- %s", n, QuotePath(path)), "", n)
+	res, err := r.runBinary(ctx, fmt.Sprintf("head -c %d -- %s", n, QuotePath(path)), "", n)
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -587,17 +588,51 @@ func TestProcTakeNewCursorInsideRune(t *testing.T) {
 }
 
 // 并发写入且输出已被截断：游标必须单调推进，每个字节要么交付要么计入
-// 省略，-race 下不能报数据竞争。
+// 省略，-race 下不能报数据竞争。读者先启动、写者每写一块让出调度，
+// 保证读写真正交错；旧实现（字符串下标当游标）只能读到一两次，
+// 会卡在非空读取次数上。
 func TestProcTakeNewConcurrentWithTruncation(t *testing.T) {
 	const (
-		writers = 4
-		chunks  = 100
-		chunk   = "abcdefghij"
+		writers  = 4
+		chunks   = 100
+		chunk    = "abcdefghij"
+		minReads = 50
 	)
 	p := &Proc{ID: "proc_trunc_race", out: newCapWriter(16)}
 	// 先写到超过 cap，保证后续每次读取都跨在缺口上。
 	p.out.Write([]byte(strings.Repeat(chunk, 2)))
 	prefill := 2 * len(chunk)
+
+	writersDone := make(chan struct{})
+	readerReady := make(chan struct{})
+	reads := make(chan string, 1<<16)
+	go func() {
+		defer close(reads)
+		ready := false
+		for {
+			if out := p.TakeNew(); out != "" {
+				reads <- out
+				if !ready {
+					close(readerReady)
+					ready = true
+				}
+				continue
+			}
+			select {
+			case <-writersDone:
+				// 写完后再读一次，把最后一段收干净。
+				if out := p.TakeNew(); out != "" {
+					reads <- out
+					continue
+				}
+				return
+			default:
+				runtime.Gosched()
+			}
+		}
+	}()
+	// 等读者先拿到预填内容，再开始写，避免第一次读已经在全部写完之后。
+	<-readerReady
 
 	var wg sync.WaitGroup
 	for i := 0; i < writers; i++ {
@@ -606,15 +641,19 @@ func TestProcTakeNewConcurrentWithTruncation(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < chunks; j++ {
 				p.out.Write([]byte(chunk))
+				// 让读者有机会在两次写入之间读到增量；只用 Gosched
+				// 时写者仍可能在读者被调度前跑完。
+				time.Sleep(time.Millisecond)
 			}
 		}()
 	}
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
+	wg.Wait()
+	close(writersDone)
 
 	marker := regexp.MustCompile(`\n?…（中间省略 (\d+) 字节，共 \d+ 字节）…\n`)
-	delivered, skipped := 0, 0
-	consume := func(out string) {
+	delivered, skipped, nonEmpty := 0, 0, 0
+	for out := range reads {
+		nonEmpty++
 		for _, m := range marker.FindAllStringSubmatch(out, -1) {
 			n, err := strconv.Atoi(m[1])
 			if err != nil {
@@ -628,28 +667,13 @@ func TestProcTakeNewConcurrentWithTruncation(t *testing.T) {
 		}
 		delivered += len(rest)
 	}
-
-	for {
-		if out := p.TakeNew(); out != "" {
-			consume(out)
-			continue
-		}
-		select {
-		case <-done:
-			// 写完后再读一次，把最后一段收干净。
-			if out := p.TakeNew(); out != "" {
-				consume(out)
-				continue
-			}
-			if want := prefill + writers*chunks*len(chunk); delivered+skipped != want {
-				t.Fatalf("交付 %d + 跳过 %d != 写入 %d", delivered, skipped, want)
-			}
-			if !p.out.Truncated() || skipped == 0 {
-				t.Fatalf("用例应触发截断并跳过字节: truncated=%v skipped=%d", p.out.Truncated(), skipped)
-			}
-			return
-		default:
-			time.Sleep(time.Millisecond)
-		}
+	if nonEmpty < minReads {
+		t.Fatalf("非空读取只有 %d 次（< %d），读写没有真正交错", nonEmpty, minReads)
+	}
+	if want := prefill + writers*chunks*len(chunk); delivered+skipped != want {
+		t.Fatalf("交付 %d + 跳过 %d != 写入 %d", delivered, skipped, want)
+	}
+	if !p.out.Truncated() || skipped == 0 {
+		t.Fatalf("用例应触发截断并跳过字节: truncated=%v skipped=%d", p.out.Truncated(), skipped)
 	}
 }

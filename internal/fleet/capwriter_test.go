@@ -134,3 +134,39 @@ func TestCapWriterSinceDoesNotRewindPastTotal(t *testing.T) {
 		t.Fatalf("越界游标不应重复交付: text=%q skipped=%d next=%d", text, skipped, next)
 	}
 }
+
+// 二进制模式不做 UTF-8 对齐：截断边界上的续字节必须原样保留，
+// 正文去掉省略标记后逐字节等于原文的 head+tail。
+func TestCapWriterBinaryKeepsBytesAtTruncation(t *testing.T) {
+	// head 在第 10 字节处切开 0xE4 开头的字符，tail 从 0xBD 续字节开始。
+	data := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0xE4,
+		0xBD, 0xA0, 0x80, 0x81, 0x82, 0xE4,
+		0xBD, 0xA0, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A,
+	}
+	w := NewCapWriterBinary(20)
+	w.Write(data)
+
+	want := string(data[:10]) + "\n…（中间省略 6 字节，共 26 字节）…\n" + string(data[16:])
+	if got := w.String(); got != want {
+		t.Fatalf("二进制模式不能裁剪边界字节:\n got %q\nwant %q", got, want)
+	}
+	// 游标恰在缺口终点：tail 开头的续字节原样返回。
+	if text, skipped, next := w.Since(16); text != string(data[16:]) || skipped != 0 || next != 26 {
+		t.Fatalf("Since(16): text=%q skipped=%d next=%d", text, skipped, next)
+	}
+	// 游标落在 tail 内的续字节上：不跳过，按字节切。
+	if text, skipped, _ := w.Since(17); text != string(data[17:]) || skipped != 0 {
+		t.Fatalf("Since(17): text=%q skipped=%d", text, skipped)
+	}
+	// 游标在缺口里：从 tail 起点给，缺口按字节数报告。
+	if text, skipped, _ := w.Since(11); skipped != 5 || !strings.HasSuffix(text, string(data[16:])) {
+		t.Fatalf("Since(11): text=%q skipped=%d", text, skipped)
+	}
+	// 未截断时逐字节一致。
+	small := NewCapWriterBinary(100)
+	small.Write(data)
+	if got := small.String(); got != string(data) {
+		t.Fatalf("未截断的二进制内容被改动: %q", got)
+	}
+}

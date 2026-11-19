@@ -9,8 +9,12 @@ import (
 
 // CapWriter 是带上限的输出收集器：超过上限后保留开头一半与末尾一半，
 // 中间省略。命令输出往往"开头有报错、结尾有结论"，两端都不能丢。
+//
+// 默认是文本模式，截断和游标边界会对齐到 UTF-8 字符边界；二进制模式
+// （NewCapWriterBinary）不做任何对齐，按原始字节切分。
 type CapWriter struct {
-	limit int
+	limit  int
+	binary bool
 
 	mu    sync.Mutex
 	head  []byte
@@ -23,6 +27,23 @@ func NewCapWriter(limit int) *CapWriter {
 		limit = 200_000
 	}
 	return &CapWriter{limit: limit}
+}
+
+// NewCapWriterBinary 返回二进制模式的收集器：截断与游标都按原始字节切分，
+// 不做 UTF-8 对齐。读取任意文件（图片、压缩包）时必须用它，否则边界上的
+// 0x80-0xBF 会被当成半个字符丢掉。
+func NewCapWriterBinary(limit int) *CapWriter {
+	w := NewCapWriter(limit)
+	w.binary = true
+	return w
+}
+
+// newCapWriter 按调用方是否声明二进制输出选择收集器。
+func newCapWriter(limit int, binary bool) *CapWriter {
+	if binary {
+		return NewCapWriterBinary(limit)
+	}
+	return NewCapWriter(limit)
 }
 
 func (w *CapWriter) Write(p []byte) (int, error) {
@@ -58,10 +79,10 @@ func (w *CapWriter) Write(p []byte) (int, error) {
 // 的长度和 tail 的位置都会变化，字符串下标会指向错误的字节。
 //
 // 返回的 text 从 off 开始；如果这段内容已被头尾裁剪掉一部分，text 会从现存
-// 最早的位置开始，并插入标记说明丢了多少字节。off 落在多字节字符中间时
-// （上一次 Write 把字符切开），向后跳到下一个完整字符，跳过的字节同样计入
-// skipped。skipped 是丢失的字节数（0 表示没有丢），next 是下一次读取应传入
-// 的偏移，不会小于 off。
+// 最早的位置开始，并插入标记说明丢了多少字节。文本模式下 off 落在多字节
+// 字符中间时（上一次 Write 把字符切开），向后跳到下一个完整字符，跳过的
+// 字节同样计入 skipped；二进制模式不做对齐。skipped 是丢失的字节数
+// （0 表示没有丢），next 是下一次读取应传入的偏移，不会小于 off。
 func (w *CapWriter) Since(off int) (text string, skipped, next int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -94,7 +115,7 @@ func (w *CapWriter) sinceLocked(off int) (string, int, int) {
 			body = w.tail[off-h:]
 		}
 		n := 0
-		if off > 0 {
+		if !w.binary && off > 0 {
 			n = continuationPrefixLen(body)
 		}
 		if n == 0 {
@@ -108,13 +129,16 @@ func (w *CapWriter) sinceLocked(off int) (string, int, int) {
 	skipped := 0
 	if off < gapStart {
 		// head 末尾可能切在多字节字符中间，半个字符无法还原，整段丢掉；
-		// 起点也可能落在字符中间，向后对齐。off=0 是流的开头，不做对齐，
-		// 否则会把 0x80-0xBF 开头的二进制内容当成续字节丢掉。
+		// 起点也可能落在字符中间，向后对齐。off=0 是流的开头，没有前一次
+		// 写入留下的半个字符，不对齐。
 		body := w.head[off:]
-		if off > 0 {
+		if !w.binary && off > 0 {
 			body = body[continuationPrefixLen(body):]
 		}
-		end := completePrefixLen(body)
+		end := len(body)
+		if !w.binary {
+			end = completePrefixLen(body)
+		}
 		headPart = body[:end]
 		skipped = gapEnd - off - end
 	} else if off < gapEnd {
@@ -123,15 +147,20 @@ func (w *CapWriter) sinceLocked(off int) (string, int, int) {
 	}
 	if off <= gapEnd {
 		// tail 开头可能是被裁掉字符的续字节，跳过。
-		n := continuationPrefixLen(w.tail)
+		n := 0
+		if !w.binary {
+			n = continuationPrefixLen(w.tail)
+		}
 		tailPart = w.tail[n:]
 		skipped += n
 	} else {
 		// 游标在 tail 内，起点同样可能落在字符中间。
 		tailPart = w.tail[off-gapEnd:]
-		n := continuationPrefixLen(tailPart)
-		tailPart = tailPart[n:]
-		skipped += n
+		if !w.binary {
+			n := continuationPrefixLen(tailPart)
+			tailPart = tailPart[n:]
+			skipped += n
+		}
 	}
 	return renderOutput(headPart, tailPart, skipped, w.total), skipped, w.total
 }

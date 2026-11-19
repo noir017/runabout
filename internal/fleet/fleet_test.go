@@ -204,6 +204,38 @@ func TestRemoteFSReadLimit(t *testing.T) {
 	}
 }
 
+// probeRunner 记录每次执行的 Spec，不真正跑命令。
+type probeRunner struct{ specs []Spec }
+
+func (p *probeRunner) Run(_ context.Context, spec Spec) (Result, error) {
+	p.specs = append(p.specs, spec)
+	return Result{}, nil
+}
+
+func (p *probeRunner) Start(context.Context, Spec) (Process, error) {
+	return nil, errors.New("unused")
+}
+
+// 读文件内容必须走二进制模式，不能依赖文本模式的 UTF-8 对齐。
+func TestRemoteFSReadsInBinaryMode(t *testing.T) {
+	p := &probeRunner{}
+	fsys := &RemoteFS{Runner: p, Target: "web1", MaxBytes: 1 << 20}
+	if _, err := fsys.ReadFile(context.Background(), "/tmp/data.bin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fsys.ReadHead(context.Background(), "/tmp/data.bin", 512); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.specs) != 2 {
+		t.Fatalf("应发起两次读取，得到 %d", len(p.specs))
+	}
+	for i, spec := range p.specs {
+		if !spec.Binary {
+			t.Errorf("第 %d 次读取没有使用二进制模式: %+v", i+1, spec)
+		}
+	}
+}
+
 func TestSSHPassesShellEnvToLocalProcess(t *testing.T) {
 	stub := stubSSH(t)
 	logFile := filepath.Join(t.TempDir(), "log")
