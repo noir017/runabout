@@ -26,8 +26,16 @@ import (
 const (
 	// maxResponseBytes 限制单次上游响应体大小，防止异常上游把内存打满。
 	maxResponseBytes = 32 << 20
+	// maxToolsListPageBytes 限制 tools/list 单页响应体大小，比通用响应上限更小。
+	maxToolsListPageBytes = 4 << 20
+	// maxToolsListBytes 限制一次 tools/list 所有分页响应体的累计大小。
+	maxToolsListBytes = 32 << 20
 	// maxToolsPerUpstream 限制一个上游返回的工具总数。
 	maxToolsPerUpstream = 1000
+	// maxToolNameBytes 限制单个工具名的大小；配置里的工具名也不超过这个长度。
+	maxToolNameBytes = 128
+	// maxToolTitleBytes 限制单个工具标题的大小。
+	maxToolTitleBytes = 1 << 10
 	// maxToolDescriptionBytes 限制单个工具描述的大小。
 	maxToolDescriptionBytes = 64 << 10
 	// maxToolSchemaBytes 限制单个工具 inputSchema 的大小。
@@ -43,6 +51,14 @@ type Tool struct {
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"inputSchema"`
 	Annotations json.RawMessage `json:"annotations,omitempty"`
+}
+
+// ToolList 是一次 tools/list 的结果。
+// Rejected 记录白名单里因超过单工具上限而被丢弃的工具名与原因；
+// 白名单之外的工具超限时直接丢弃，不在这里记录。
+type ToolList struct {
+	Tools    []Tool
+	Rejected map[string]string
 }
 
 type rpcRequest struct {
@@ -71,6 +87,15 @@ type Client struct {
 	tokenEnv string
 	hc       *http.Client
 
+	// allowed 是配置里的工具白名单，用于判断超限工具是否需要上报给 Manager。
+	allowed map[string]bool
+	// listPageLimit / listTotalLimit 是 tools/list 单页与累计响应体上限，
+	// 默认取常量，测试可以调小。
+	listPageLimit  int64
+	listTotalLimit int64
+	// beforeSession 仅用于测试：在取会话快照前调用，用来固定并发失效的时序。
+	beforeSession func()
+
 	// mu 同时保护会话状态与握手过程：同一时刻只有一个调用在握手，
 	// 其余调用等锁后直接复用结果，等价于一次 singleflight 重连。
 	mu        sync.Mutex
@@ -82,53 +107,88 @@ type Client struct {
 }
 
 func NewClient(cfg config.Upstream) *Client {
+	allowed := make(map[string]bool, len(cfg.Tools))
+	for _, name := range cfg.Tools {
+		allowed[name] = true
+	}
 	return &Client{
-		url:      cfg.URL,
-		safeURL:  redactURL(cfg.URL),
-		tokenEnv: cfg.TokenEnv,
-		hc:       &http.Client{},
+		url:            cfg.URL,
+		safeURL:        redactURL(cfg.URL),
+		tokenEnv:       cfg.TokenEnv,
+		hc:             &http.Client{},
+		allowed:        allowed,
+		listPageLimit:  maxToolsListPageBytes,
+		listTotalLimit: maxToolsListBytes,
 	}
 }
 
 // ListTools 拉取上游全部工具，自动跟随 nextCursor 分页。
-// 工具数与分页数超过上限时报错，避免静默截断。
-func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
-	if err := c.EnsureInitialized(ctx); err != nil {
-		return nil, err
-	}
-	var all []Tool
+// 每页响应体有单独上限，所有页的累计大小也有上限；工具数与分页数超过上限时报错。
+// 单个工具超过长度上限时只丢弃该工具：白名单内的记录到 Rejected，白名单外的静默丢弃。
+func (c *Client) ListTools(ctx context.Context) (ToolList, error) {
+	out := ToolList{Rejected: map[string]string{}}
 	cursor := ""
+	var total int64
 	for page := 0; ; page++ {
 		if page >= maxToolPages {
-			return nil, fmt.Errorf("工具列表分页超过 %d 页上限", maxToolPages)
+			return ToolList{}, fmt.Errorf("工具列表分页超过 %d 页上限", maxToolPages)
 		}
 		params := map[string]any{}
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
+		rep, err := c.callRetry(ctx, "tools/list", params, c.listPageLimit, true)
+		if err != nil {
+			return ToolList{}, err
+		}
+		total += rep.size
+		if total > c.listTotalLimit {
+			return ToolList{}, fmt.Errorf("tools/list 响应累计超过 %d 字节上限", c.listTotalLimit)
+		}
 		var res struct {
 			Tools      []Tool `json:"tools"`
 			NextCursor string `json:"nextCursor"`
 		}
-		if err := c.call(ctx, "tools/list", params, &res); err != nil {
-			return nil, err
+		if err := json.Unmarshal(rep.raw, &res); err != nil {
+			return ToolList{}, fmt.Errorf("上游结果无法解析: %w", err)
 		}
-		all = append(all, res.Tools...)
-		if len(all) > maxToolsPerUpstream {
-			return nil, fmt.Errorf("上游工具数超过 %d 上限", maxToolsPerUpstream)
+		for _, t := range res.Tools {
+			// 解码一页就立刻检查，避免把超限工具累积到内存里。
+			if reason := toolLimitReason(t); reason != "" {
+				if c.allowed[t.Name] {
+					out.Rejected[t.Name] = reason
+				}
+				continue
+			}
+			if len(out.Tools) >= maxToolsPerUpstream {
+				return ToolList{}, fmt.Errorf("上游工具数超过 %d 上限", maxToolsPerUpstream)
+			}
+			out.Tools = append(out.Tools, t)
 		}
 		if res.NextCursor == "" {
-			return all, nil
+			return out, nil
 		}
 		cursor = res.NextCursor
 	}
 }
 
+// toolLimitReason 返回工具定义超限的原因；未超限时返回空字符串。
+func toolLimitReason(t Tool) string {
+	switch {
+	case len(t.Name) > maxToolNameBytes:
+		return fmt.Sprintf("name 超过 %d 字节上限", maxToolNameBytes)
+	case len(t.Title) > maxToolTitleBytes:
+		return fmt.Sprintf("title 超过 %d 字节上限", maxToolTitleBytes)
+	case len(t.Description) > maxToolDescriptionBytes:
+		return fmt.Sprintf("description 超过 %d 字节上限", maxToolDescriptionBytes)
+	case len(t.InputSchema) > maxToolSchemaBytes:
+		return fmt.Sprintf("inputSchema 超过 %d 字节上限", maxToolSchemaBytes)
+	}
+	return ""
+}
+
 // CallTool 转发 tools/call，返回上游的原始 result 对象。
 func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
-	if err := c.EnsureInitialized(ctx); err != nil {
-		return nil, err
-	}
 	arguments := args
 	if len(arguments) == 0 {
 		arguments = json.RawMessage("{}")
@@ -144,15 +204,21 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 	return raw, nil
 }
 
-// EnsureInitialized 完成 initialize 握手并发送 initialized 通知。
-// 并发调用安全：握手在 c.mu 内完成，后来者等锁后直接看到 inited，只连一次。
-func (c *Client) EnsureInitialized(ctx context.Context) error {
+// sessionForCall 在一次加锁内完成"确保已初始化"与"取会话快照"。
+// 两步分开做时，并发 invalidateSession 可能正好插在中间，导致请求不带
+// Mcp-Session-Id 发出去；合并后这个窗口不存在。
+func (c *Client) sessionForCall(ctx context.Context) (sid, proto string, err error) {
+	if c.beforeSession != nil {
+		c.beforeSession()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.inited {
-		return nil
+	if !c.inited {
+		if err := c.initializeLocked(ctx); err != nil {
+			return "", "", err
+		}
 	}
-	return c.initializeLocked(ctx)
+	return c.sessionID, c.proto, nil
 }
 
 func (c *Client) initializeLocked(ctx context.Context) error {
@@ -161,17 +227,17 @@ func (c *Client) initializeLocked(ctx context.Context) error {
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "runabout", "version": "1.0"},
 	}
-	raw, hdr, status, err := c.request(ctx, "initialize", params, "", "", false)
+	rep, err := c.request(ctx, "initialize", params, "", "", false, maxResponseBytes)
 	if err != nil {
 		return err
 	}
-	if status < 200 || status >= 300 {
-		return fmt.Errorf("initialize 返回 HTTP %d", status)
+	if rep.status < 200 || rep.status >= 300 {
+		return fmt.Errorf("initialize 返回 HTTP %d", rep.status)
 	}
 	var res struct {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
-	if err := json.Unmarshal(raw, &res); err != nil {
+	if err := json.Unmarshal(rep.raw, &res); err != nil {
 		return fmt.Errorf("initialize 结果无法解析: %w", err)
 	}
 	// 以服务端返回的版本为准，后续请求与 initialized 通知都带这个版本。
@@ -179,9 +245,9 @@ func (c *Client) initializeLocked(ctx context.Context) error {
 	if proto == "" {
 		proto = mcp.ProtocolLatest
 	}
-	sid := hdr.Get("Mcp-Session-Id")
+	sid := rep.header.Get("Mcp-Session-Id")
 
-	if _, _, _, err := c.request(ctx, "notifications/initialized", nil, sid, proto, true); err != nil {
+	if _, err := c.request(ctx, "notifications/initialized", nil, sid, proto, true, maxResponseBytes); err != nil {
 		return fmt.Errorf("发送 initialized 通知失败: %w", err)
 	}
 
@@ -191,40 +257,48 @@ func (c *Client) initializeLocked(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) call(ctx context.Context, method string, params any, out any) error {
-	return c.callRetry(ctx, method, params, out, true)
+// rpcReply 是一次 JSON-RPC 请求的原始结果与响应元信息。
+type rpcReply struct {
+	raw    json.RawMessage
+	header http.Header
+	status int
+	size   int64 // 响应体字节数，用于 tools/list 的累计上限
 }
 
-func (c *Client) callRetry(ctx context.Context, method string, params any, out any, mayRetry bool) error {
-	sid, proto := c.session()
-	raw, _, status, err := c.request(ctx, method, params, sid, proto, false)
+func (c *Client) call(ctx context.Context, method string, params any, out any) error {
+	rep, err := c.callRetry(ctx, method, params, maxResponseBytes, true)
 	if err != nil {
 		return err
-	}
-	// 会话过期时上游按规范回 404：只清掉自己用过的那个会话，重新握手后重试一次。
-	if status == http.StatusNotFound {
-		if sid == "" || !mayRetry {
-			return fmt.Errorf("上游会话不可用（HTTP 404）")
-		}
-		c.invalidateSession(sid)
-		if err := c.EnsureInitialized(ctx); err != nil {
-			return err
-		}
-		return c.callRetry(ctx, method, params, out, false)
 	}
 	if out == nil {
 		return nil
 	}
-	if err := json.Unmarshal(raw, out); err != nil {
+	if err := json.Unmarshal(rep.raw, out); err != nil {
 		return fmt.Errorf("上游结果无法解析: %w", err)
 	}
 	return nil
 }
 
-func (c *Client) session() (sid, proto string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.sessionID, c.proto
+func (c *Client) callRetry(ctx context.Context, method string, params any, limit int64, mayRetry bool) (rpcReply, error) {
+	sid, proto, err := c.sessionForCall(ctx)
+	if err != nil {
+		return rpcReply{}, err
+	}
+	rep, err := c.request(ctx, method, params, sid, proto, false, limit)
+	if err != nil {
+		return rpcReply{}, err
+	}
+	// 会话过期时上游按规范回 404：只清掉自己用过的那个会话，重新握手后重试一次。
+	// 即使快照里的会话为空也重试一次（可能是并发失效刚清空的），重试次数由
+	// mayRetry 限制，不会对错误地址无限重连。
+	if rep.status == http.StatusNotFound {
+		if !mayRetry {
+			return rpcReply{}, fmt.Errorf("上游会话不可用（HTTP 404）")
+		}
+		c.invalidateSession(sid)
+		return c.callRetry(ctx, method, params, limit, false)
+	}
+	return rep, nil
 }
 
 // invalidateSession 只在当前会话仍是 stale 时才清空。
@@ -282,8 +356,9 @@ func (c *Client) post(ctx context.Context, payload []byte, sid, proto string) (*
 
 // request 发送一条 JSON-RPC 请求并返回原始 result。
 // notify=true 时不解析响应体，只检查 HTTP 状态码。
+// limit 是响应体字节上限（notify 固定为 4KB）。
 // SSE 响应按流逐行读取，拿到匹配 id 的事件立即返回并关闭 body。
-func (c *Client) request(ctx context.Context, method string, params any, sid, proto string, notify bool) (json.RawMessage, http.Header, int, error) {
+func (c *Client) request(ctx context.Context, method string, params any, sid, proto string, notify bool, limit int64) (rpcReply, error) {
 	var idPtr *int64
 	if !notify {
 		id := c.nextID.Add(1)
@@ -291,47 +366,52 @@ func (c *Client) request(ctx context.Context, method string, params any, sid, pr
 	}
 	payload, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: idPtr, Method: method, Params: params})
 	if err != nil {
-		return nil, nil, 0, err
+		return rpcReply{}, err
 	}
 	resp, err := c.post(ctx, payload, sid, proto)
 	if err != nil {
-		return nil, nil, 0, err
+		return rpcReply{}, err
 	}
 	defer resp.Body.Close()
 
 	if notify {
 		body, _ := readLimited(resp.Body, 4<<10)
+		rep := rpcReply{header: resp.Header, status: resp.StatusCode, size: int64(len(body))}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, resp.Header, resp.StatusCode, httpStatusError(resp.StatusCode, body)
+			return rep, httpStatusError(resp.StatusCode, body)
 		}
-		return nil, resp.Header, resp.StatusCode, nil
+		return rep, nil
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-		return nil, resp.Header, resp.StatusCode, nil
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return rpcReply{header: resp.Header, status: resp.StatusCode, size: int64(len(body))}, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := readLimited(resp.Body, 64<<10)
-		return nil, resp.Header, resp.StatusCode, httpStatusError(resp.StatusCode, body)
+		return rpcReply{header: resp.Header, status: resp.StatusCode, size: int64(len(body))},
+			httpStatusError(resp.StatusCode, body)
 	}
 
 	var raw json.RawMessage
+	var size int64
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		raw, err = readSSE(resp.Body, *idPtr)
+		raw, size, err = readSSE(resp.Body, *idPtr, limit)
 	} else {
 		var body []byte
-		body, err = readLimited(resp.Body, maxResponseBytes)
+		body, err = readLimited(resp.Body, limit)
+		size = int64(len(body))
 		if err == nil {
 			raw, err = decodeJSONResult(body, *idPtr)
 		}
 	}
+	rep := rpcReply{raw: raw, header: resp.Header, status: resp.StatusCode, size: size}
 	if err != nil {
-		return nil, resp.Header, resp.StatusCode, err
+		return rep, err
 	}
 	if !isJSONObject(raw) {
-		return nil, resp.Header, resp.StatusCode, fmt.Errorf("上游 result 不是 JSON 对象")
+		return rep, fmt.Errorf("上游 result 不是 JSON 对象")
 	}
-	return raw, resp.Header, resp.StatusCode, nil
+	return rep, nil
 }
 
 // readLimited 读取至多 limit 字节；超出时返回明确错误，而不是悄悄截断。
@@ -358,22 +438,23 @@ func decodeJSONResult(body []byte, id int64) (json.RawMessage, error) {
 }
 
 // readSSE 逐行解析 SSE，读到匹配 id 的事件就返回，不等待连接关闭。
-func readSSE(r io.Reader, id int64) (json.RawMessage, error) {
+// 返回已读取的字节数，用于 tools/list 的累计上限。
+func readSSE(r io.Reader, id int64, limit int64) (json.RawMessage, int64, error) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64<<10), maxResponseBytes)
+	scanner.Buffer(make([]byte, 0, 64<<10), int(limit))
 	var data []string
 	var total int64
 	for scanner.Scan() {
 		line := scanner.Text()
 		total += int64(len(line)) + 1
-		if total > maxResponseBytes {
-			return nil, fmt.Errorf("SSE 响应超过 %d 字节上限", maxResponseBytes)
+		if total > limit {
+			return nil, total, fmt.Errorf("SSE 响应超过 %d 字节上限", limit)
 		}
 		if line == "" {
 			if raw, ok, err := matchEvent(data, id); err != nil {
-				return nil, err
+				return nil, total, err
 			} else if ok {
-				return raw, nil
+				return raw, total, nil
 			}
 			data = nil
 			continue
@@ -383,14 +464,14 @@ func readSSE(r io.Reader, id int64) (json.RawMessage, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("读取 SSE 响应失败: %w", err)
+		return nil, total, fmt.Errorf("读取 SSE 响应失败: %w", err)
 	}
 	if raw, ok, err := matchEvent(data, id); err != nil {
-		return nil, err
+		return nil, total, err
 	} else if ok {
-		return raw, nil
+		return raw, total, nil
 	}
-	return nil, fmt.Errorf("SSE 响应里没有找到对应的 JSON-RPC 结果")
+	return nil, total, fmt.Errorf("SSE 响应里没有找到对应的 JSON-RPC 结果")
 }
 
 func matchEvent(data []string, id int64) (json.RawMessage, bool, error) {

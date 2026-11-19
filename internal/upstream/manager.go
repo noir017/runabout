@@ -46,6 +46,8 @@ type endpoint struct {
 	mu      sync.RWMutex
 	defs    map[string]mcp.ToolDef // 上游工具名 -> 对外定义
 	fetched bool
+	// warned 记录已经 warn 过的超限工具，避免每次刷新都重复刷日志。
+	warned map[string]bool
 }
 
 // New 构造 Manager。cfgs 为空时所有方法都是安全的空操作。
@@ -68,6 +70,7 @@ func New(cfgs []config.Upstream, log *slog.Logger) *Manager {
 			client:  NewClient(cfg),
 			allowed: make(map[string]bool, len(cfg.Tools)),
 			defs:    map[string]mcp.ToolDef{},
+			warned:  map[string]bool{},
 		}
 		for _, name := range cfg.Tools {
 			ep.allowed[name] = true
@@ -159,45 +162,80 @@ func (m *Manager) RefreshAll(ctx context.Context) error {
 }
 
 func (m *Manager) refresh(ctx context.Context, ep *endpoint) error {
-	tools, err := ep.client.ListTools(ctx)
+	list, err := ep.client.ListTools(ctx)
 	if err != nil {
 		return err
 	}
-	if len(tools) > maxToolsPerUpstream {
-		return fmt.Errorf("上游返回 %d 个工具，超过 %d 上限", len(tools), maxToolsPerUpstream)
-	}
-	byName := make(map[string]Tool, len(tools))
-	for _, t := range tools {
+	byName := make(map[string]Tool, len(list.Tools))
+	for _, t := range list.Tools {
 		byName[t.Name] = t
 	}
+
+	// 先取上一版定义：本次超限的工具沿用旧定义，而不是让整次刷新失败。
+	ep.mu.RLock()
+	prev := make(map[string]mcp.ToolDef, len(ep.defs))
+	for name, def := range ep.defs {
+		prev[name] = def
+	}
+	ep.mu.RUnlock()
+
+	type badTool struct{ name, reason string }
+	var bad []badTool
 	defs := make(map[string]mcp.ToolDef, len(ep.cfg.Tools))
 	for _, name := range ep.cfg.Tools {
+		if reason, rejected := list.Rejected[name]; rejected {
+			def, ok := prev[name]
+			if !ok {
+				def = ep.oversizedDef(name)
+			}
+			defs[name] = def
+			bad = append(bad, badTool{name: name, reason: reason})
+			continue
+		}
 		t, ok := byName[name]
 		if !ok {
 			continue
 		}
-		if len(t.Description) > maxToolDescriptionBytes {
-			return fmt.Errorf("工具 %s 的 description 超过 %d 字节上限", name, maxToolDescriptionBytes)
-		}
-		if len(t.InputSchema) > maxToolSchemaBytes {
-			return fmt.Errorf("工具 %s 的 inputSchema 超过 %d 字节上限", name, maxToolSchemaBytes)
-		}
 		defs[name] = ep.buildDef(t)
 	}
+
+	badSet := make(map[string]bool, len(bad))
+	for _, b := range bad {
+		badSet[b.name] = true
+	}
+
 	ep.mu.Lock()
 	ep.defs = defs
 	ep.fetched = true
+	var fresh []badTool
+	for _, b := range bad {
+		if !ep.warned[b.name] {
+			ep.warned[b.name] = true
+			fresh = append(fresh, b)
+		}
+	}
+	// 工具恢复正常后清掉记录，下次再超限时重新 warn 一次。
+	for name := range ep.warned {
+		if !badSet[name] {
+			delete(ep.warned, name)
+		}
+	}
 	ep.mu.Unlock()
-	m.log.Info("上游工具列表已刷新", "upstream", ep.cfg.Name, "exposed", len(defs))
+
+	for _, b := range fresh {
+		m.log.Warn("上游工具定义超限，跳过本次更新", "upstream", ep.cfg.Name, "tool", b.name, "reason", b.reason)
+	}
+	m.log.Info("上游工具列表已刷新", "upstream", ep.cfg.Name, "exposed", len(defs), "skipped", len(bad))
 	return nil
 }
 
 // Definition 返回某个白名单工具的对外定义；上游定义还没拉到时返回占位定义。
-func (m *Manager) Definition(upstreamName, tool string) mcp.ToolDef {
+// prefix 由调用方从配置传入，保证上游未配置时占位名也带前缀。
+func (m *Manager) Definition(upstreamName, prefix, tool string) mcp.ToolDef {
 	ep := m.eps[upstreamName]
 	if ep == nil {
 		return mcp.ToolDef{
-			Name:        tool,
+			Name:        prefix + "_" + tool,
 			Description: "上游工具（配置里找不到对应上游）",
 			InputSchema: fallbackSchema(),
 		}
@@ -269,6 +307,18 @@ func (ep *endpoint) fallbackDef(tool string, fetched bool) mcp.ToolDef {
 	return mcp.ToolDef{
 		Name:        ep.cfg.Prefix + "_" + tool,
 		Description: desc,
+		InputSchema: fallbackSchema(),
+	}
+}
+
+// oversizedDef 是定义超限且没有上一版时的占位定义。
+// 工具本身仍在上游列表里，调用会原样转发，因此不能用"列表里没有"的描述。
+func (ep *endpoint) oversizedDef(tool string) mcp.ToolDef {
+	return mcp.ToolDef{
+		Name: ep.cfg.Prefix + "_" + tool,
+		Description: fmt.Sprintf(
+			"上游 %s 的工具 %s 定义超过大小上限，本次未更新；调用仍会原样转发。",
+			ep.cfg.Name, tool),
 		InputSchema: fallbackSchema(),
 	}
 }

@@ -11,11 +11,12 @@ import (
 type upstreamTool struct {
 	d        *Deps
 	upstream string
+	prefix   string
 	tool     string
 }
 
 func (t *upstreamTool) Definition() mcp.ToolDef {
-	return t.d.Upstreams.Definition(t.upstream, t.tool)
+	return t.d.Upstreams.Definition(t.upstream, t.prefix, t.tool)
 }
 
 func (t *upstreamTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallToolResult, error) {
@@ -36,7 +37,7 @@ func upstreamTools(d *Deps) []mcp.Handler {
 	var out []mcp.Handler
 	for _, u := range d.Cfg.Upstreams {
 		for _, name := range u.Tools {
-			out = append(out, &upstreamTool{d: d, upstream: u.Name, tool: name})
+			out = append(out, &upstreamTool{d: d, upstream: u.Name, prefix: u.Prefix, tool: name})
 		}
 	}
 	return out
