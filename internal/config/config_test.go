@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -150,17 +151,20 @@ func TestUpstreamConfigRejectsInvalid(t *testing.T) {
 		return Upstream{Name: "fd", URL: "http://127.0.0.1:9000/mcp", Prefix: "fd", Tools: []string{"topic_list"}}
 	}
 	cases := map[string]func(*Config){
-		"空名字":          func(c *Config) { c.Upstreams[0].Name = "" },
-		"重复名字":         func(c *Config) { c.Upstreams = append(c.Upstreams, valid()) },
-		"空 URL":        func(c *Config) { c.Upstreams[0].URL = "" },
-		"非 http":       func(c *Config) { c.Upstreams[0].URL = "ftp://example.com/mcp" },
-		"URL 带凭据":      func(c *Config) { c.Upstreams[0].URL = "http://user:pass@example.com/mcp" },
-		"空前缀":          func(c *Config) { c.Upstreams[0].Prefix = "" },
-		"非法前缀":         func(c *Config) { c.Upstreams[0].Prefix = "fd x" },
-		"空白名单":         func(c *Config) { c.Upstreams[0].Tools = nil },
-		"非法工具名":        func(c *Config) { c.Upstreams[0].Tools = []string{"bad tool"} },
-		"非法 token_env": func(c *Config) { c.Upstreams[0].TokenEnv = "1BAD" },
-		"与内置工具重名":      func(c *Config) { c.Upstreams[0].Prefix = "shell"; c.Upstreams[0].Tools = []string{"output"} },
+		"空名字":            func(c *Config) { c.Upstreams[0].Name = "" },
+		"名字含空格":          func(c *Config) { c.Upstreams[0].Name = "bad name" },
+		"重复名字":           func(c *Config) { c.Upstreams = append(c.Upstreams, valid()) },
+		"空 URL":          func(c *Config) { c.Upstreams[0].URL = "" },
+		"非 http":         func(c *Config) { c.Upstreams[0].URL = "ftp://example.com/mcp" },
+		"URL 带凭据":        func(c *Config) { c.Upstreams[0].URL = "http://user:pass@example.com/mcp" },
+		"URL 带 query":    func(c *Config) { c.Upstreams[0].URL = "http://example.com/mcp?token=x" },
+		"URL 带 fragment": func(c *Config) { c.Upstreams[0].URL = "http://example.com/mcp#frag" },
+		"空前缀":            func(c *Config) { c.Upstreams[0].Prefix = "" },
+		"非法前缀":           func(c *Config) { c.Upstreams[0].Prefix = "fd x" },
+		"空白名单":           func(c *Config) { c.Upstreams[0].Tools = nil },
+		"非法工具名":          func(c *Config) { c.Upstreams[0].Tools = []string{"bad tool"} },
+		"非法 token_env":   func(c *Config) { c.Upstreams[0].TokenEnv = "1BAD" },
+		"与内置工具重名":        func(c *Config) { c.Upstreams[0].Prefix = "shell"; c.Upstreams[0].Tools = []string{"output"} },
 		"跨上游重名": func(c *Config) {
 			second := valid()
 			second.Name = "other"
@@ -178,6 +182,24 @@ func TestUpstreamConfigRejectsInvalid(t *testing.T) {
 				t.Error("非法配置应报错")
 			}
 		})
+	}
+}
+
+func TestUpstreamURLErrorRedactsQuery(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x"}}
+	cfg.Upstreams = []Upstream{{
+		Name: "fd", URL: "http://example.com/mcp?token=secret", Prefix: "fd", Tools: []string{"a"},
+	}}
+	err := cfg.Normalize()
+	if err == nil {
+		t.Fatal("带 query 的 URL 应被拒绝")
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Errorf("错误信息不应回显 query: %v", err)
+	}
+	if !strings.Contains(err.Error(), "http://example.com/mcp") {
+		t.Errorf("错误信息应保留 scheme+host+path: %v", err)
 	}
 }
 

@@ -131,6 +131,11 @@ runabout 的设计目标是运行在反向代理或 Tunnel 后面，而不是直
 6. **确认令牌** — 需要审批的操作可以通过明确的确认令牌执行。
 7. **审计日志** — 可以将工具调用记录为 JSONL 日志。
 
+启用上游透传后还有两条边界：
+
+- 所有透传工具共用 `token_env` 指定的一把上游令牌。runabout 不按调用方或工具拆分该令牌，上游工具也**不受** `auth.static_tokens[].allowed_targets` 与 `auth.client_policies` 约束。
+- 上游的 `annotations` 原样透传。runabout 不校验 `readOnlyHint`，也不对上游调用套用自己的 shell 与路径策略；真正的权限边界在上游。
+
 runabout 不依赖外部身份提供商。客户端注册（RFC 7591）、授权码 + PKCE、Token 签发和 Token 轮换均由本地服务处理。
 
 **除非你明确希望赋予 Agent root 权限，否则不要以 root 身份运行 runabout。**

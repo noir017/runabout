@@ -658,6 +658,9 @@ func (c *Config) normalizeUpstreams() error {
 		if u.Name == "" {
 			return fmt.Errorf("upstreams[%d].name 不能为空", i)
 		}
+		if !upstreamNameRE.MatchString(u.Name) {
+			return fmt.Errorf("upstreams[%d].name 只能包含字母、数字、下划线与连字符，当前为 %q", i, u.Name)
+		}
 		if seenName[u.Name] {
 			return fmt.Errorf("upstreams 里的名字 %q 重复", u.Name)
 		}
@@ -666,10 +669,14 @@ func (c *Config) normalizeUpstreams() error {
 		u.URL = strings.TrimSpace(u.URL)
 		parsed, err := url.Parse(u.URL)
 		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return fmt.Errorf("upstreams[%d].url 必须是 http(s) 绝对地址，当前为 %q", i, u.URL)
+			return fmt.Errorf("upstreams[%d].url 必须是 http(s) 绝对地址，当前为 %q", i, redactURL(u.URL))
 		}
 		if parsed.User != nil {
 			return fmt.Errorf("upstreams[%d].url 里不要写凭据，令牌请用 token_env", i)
+		}
+		// query 与 fragment 不参与 MCP 端点定位，且容易夹带凭据，直接拒绝。
+		if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" {
+			return fmt.Errorf("upstreams[%d].url 不能带 query 或 fragment，当前为 %q", i, redactURL(u.URL))
 		}
 
 		u.Prefix = strings.TrimSpace(u.Prefix)
@@ -718,6 +725,20 @@ func (c *Config) normalizeUpstreams() error {
 		}
 	}
 	return nil
+}
+
+// redactURL 只保留 scheme、host 与 path，避免错误信息回显 query 里的凭据。
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "(invalid url)"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawFragment = ""
+	u.ForceQuery = false
+	return u.String()
 }
 
 // validRemoteWorkdir 只接受远端可判定的路径：绝对路径、~ 或 ~/...。

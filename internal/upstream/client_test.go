@@ -18,21 +18,41 @@ import (
 
 // fakeUpstream 是一个最小的 MCP Streamable HTTP 上游，用来验证客户端行为。
 type fakeUpstream struct {
-	mu           sync.Mutex
-	tools        []Tool
-	requireToken string
-	sse          bool
+	mu              sync.Mutex
+	tools           []Tool
+	requireToken    string
+	sse             bool
+	protocol        string
+	notifyStatus    int
+	badResult       bool
+	paginateForever bool
+
 	session      string
 	sessionSeq   int
 	initCount    int
 	calls        []fakeCall
+	requests     []fakeRequest
+	expired      map[string]bool
 	expireOnCall bool
+
+	// barrierSize > 0 时，tools/call 会等齐这么多请求后再一起处理，
+	// 用来稳定复现"并发请求同时撞上会话过期"。
+	barrierSize int
+	barrierCh   chan struct{}
+	barrierN    int
 }
 
 type fakeCall struct {
 	Name    string
 	Args    json.RawMessage
 	Session string
+}
+
+type fakeRequest struct {
+	Method  string
+	Proto   string
+	Session string
+	Auth    string
 }
 
 func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -54,6 +74,15 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
+	f.mu.Lock()
+	f.requests = append(f.requests, fakeRequest{
+		Method:  req.Method,
+		Proto:   r.Header.Get("MCP-Protocol-Version"),
+		Session: r.Header.Get("Mcp-Session-Id"),
+		Auth:    r.Header.Get("Authorization"),
+	})
+	f.mu.Unlock()
+
 	switch req.Method {
 	case "initialize":
 		f.mu.Lock()
@@ -61,26 +90,55 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.session = fmt.Sprintf("sess-%d", f.sessionSeq)
 		sid := f.session
 		f.initCount++
+		proto := f.protocol
+		if proto == "" {
+			proto = "2025-06-18"
+		}
 		f.mu.Unlock()
 		w.Header().Set("Mcp-Session-Id", sid)
 		f.respond(w, req.ID, map[string]any{
-			"protocolVersion": "2025-06-18",
+			"protocolVersion": proto,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "fake", "version": "1"},
 		})
 	case "notifications/initialized":
+		f.mu.Lock()
+		status := f.notifyStatus
+		f.mu.Unlock()
+		if status != 0 {
+			http.Error(w, "notify failed", status)
+			return
+		}
 		w.WriteHeader(http.StatusAccepted)
 	case "tools/list":
+		if !f.sessionOK(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		f.mu.Lock()
-		valid := f.session == "" || r.Header.Get("Mcp-Session-Id") == f.session
+		paginate := f.paginateForever
 		tools := append([]Tool(nil), f.tools...)
 		f.mu.Unlock()
-		if !valid {
-			w.WriteHeader(http.StatusNotFound)
+		if paginate {
+			f.respond(w, req.ID, map[string]any{"tools": []any{}, "nextCursor": "more"})
 			return
 		}
 		f.respond(w, req.ID, map[string]any{"tools": tools})
 	case "tools/call":
+		if f.barrierSize > 0 {
+			f.mu.Lock()
+			if f.barrierCh == nil {
+				f.barrierCh = make(chan struct{})
+			}
+			f.barrierN++
+			if f.barrierN == f.barrierSize {
+				close(f.barrierCh)
+			}
+			ch := f.barrierCh
+			f.mu.Unlock()
+			<-ch
+		}
+
 		var p struct {
 			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
@@ -88,15 +146,20 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(req.Params, &p)
 
 		f.mu.Lock()
-		expire := f.expireOnCall
-		if expire {
+		if f.expireOnCall {
 			f.expireOnCall = false
+			f.expired[f.session] = true
 			f.session = ""
 		}
-		valid := f.session == "" || r.Header.Get("Mcp-Session-Id") == f.session
+		valid := f.sessionOKLocked(r)
+		badResult := f.badResult
 		f.mu.Unlock()
-		if expire || !valid {
+		if !valid {
 			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if badResult {
+			f.respond(w, req.ID, []any{"not", "an", "object"})
 			return
 		}
 
@@ -115,6 +178,23 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		f.respondError(w, req.ID, -32601, "method not found")
 	}
+}
+
+func (f *fakeUpstream) sessionOK(r *http.Request) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sessionOKLocked(r)
+}
+
+func (f *fakeUpstream) sessionOKLocked(r *http.Request) bool {
+	sid := r.Header.Get("Mcp-Session-Id")
+	if sid == "" {
+		return f.session == ""
+	}
+	if f.expired[sid] {
+		return false
+	}
+	return f.session == "" || sid == f.session
 }
 
 func (f *fakeUpstream) respond(w http.ResponseWriter, id *int64, result any) {
@@ -151,6 +231,16 @@ func (f *fakeUpstream) stats() (initCount int, calls []fakeCall) {
 	return f.initCount, append([]fakeCall(nil), f.calls...)
 }
 
+func (f *fakeUpstream) seenRequests() []fakeRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeRequest(nil), f.requests...)
+}
+
+func newFake() *fakeUpstream {
+	return &fakeUpstream{expired: map[string]bool{}}
+}
+
 func testConfig(url string) config.Upstream {
 	return config.Upstream{
 		Name: "fake", URL: url, Prefix: "fk", Tools: []string{"echo"},
@@ -159,14 +249,13 @@ func testConfig(url string) config.Upstream {
 }
 
 func TestClientListAndCall(t *testing.T) {
-	fake := &fakeUpstream{
-		requireToken: "s3cret",
-		tools: []Tool{{
-			Name:        "echo",
-			Description: "回显参数",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"msg":{"type":"string"}}}`),
-		}},
-	}
+	fake := newFake()
+	fake.requireToken = "s3cret"
+	fake.tools = []Tool{{
+		Name:        "echo",
+		Description: "回显参数",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"msg":{"type":"string"}}}`),
+	}}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -209,11 +298,40 @@ func TestClientListAndCall(t *testing.T) {
 	}
 }
 
-func TestClientSSEResponse(t *testing.T) {
-	fake := &fakeUpstream{
-		sse:   true,
-		tools: []Tool{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+func TestClientUsesServerProtocolVersion(t *testing.T) {
+	fake := newFake()
+	fake.protocol = "2025-03-26"
+	fake.tools = []Tool{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	c := NewClient(testConfig(srv.URL))
+	ctx := context.Background()
+	if _, err := c.ListTools(ctx); err != nil {
+		t.Fatal(err)
 	}
+	if _, err := c.CallTool(ctx, "echo", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, req := range fake.seenRequests() {
+		switch req.Method {
+		case "initialize":
+			if req.Proto != "" {
+				t.Errorf("initialize 不应带 MCP-Protocol-Version，实际 %q", req.Proto)
+			}
+		default:
+			if req.Proto != "2025-03-26" {
+				t.Errorf("%s 应使用服务端返回的协议版本 2025-03-26，实际 %q", req.Method, req.Proto)
+			}
+		}
+	}
+}
+
+func TestClientSSEResponse(t *testing.T) {
+	fake := newFake()
+	fake.sse = true
+	fake.tools = []Tool{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -227,11 +345,61 @@ func TestClientSSEResponse(t *testing.T) {
 	}
 }
 
-func TestClientReinitializesOnSessionExpiry(t *testing.T) {
-	fake := &fakeUpstream{
-		tools:        []Tool{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}},
-		expireOnCall: true,
+// TestClientSSEStreamsWithoutClosing 验证客户端读到匹配事件后立即返回，
+// 不会一直等到上游关闭连接。
+func TestClientSSEStreamsWithoutClosing(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			ID     *int64 `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		switch req.Method {
+		case "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": *req.ID,
+				"result": map[string]any{"protocolVersion": "2025-06-18"},
+			})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/call":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, _ := w.(http.Flusher)
+			fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n\n", *req.ID)
+			flusher.Flush()
+			// 发完事件故意不关连接。
+			<-release
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	c := NewClient(testConfig(srv.URL))
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.CallTool(context.Background(), "echo", nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SSE 调用失败: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("客户端应在读到匹配事件后立即返回，而不是等待连接关闭")
 	}
+}
+
+// TestClientConcurrentSessionExpiry 验证多个请求同时撞上会话过期时，
+// 只重建一次会话，且不会互相清掉对方新建的会话。
+func TestClientConcurrentSessionExpiry(t *testing.T) {
+	fake := newFake()
+	fake.tools = []Tool{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+	fake.expireOnCall = true
+	fake.barrierSize = 8
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -240,20 +408,31 @@ func TestClientReinitializesOnSessionExpiry(t *testing.T) {
 	if _, err := c.ListTools(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.CallTool(ctx, "echo", nil); err != nil {
-		t.Fatalf("会话过期后应自动重新握手并重试: %v", err)
+
+	const n = 8
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			_, err := c.CallTool(ctx, "echo", nil)
+			errs <- err
+		}()
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("并发重连后调用应成功: %v", err)
+		}
 	}
 	initCount, calls := fake.stats()
 	if initCount != 2 {
-		t.Errorf("应重新握手一次，实际握手 %d 次", initCount)
+		t.Errorf("并发过期只应重连一次（共 2 次握手），实际 %d 次", initCount)
 	}
-	if len(calls) != 1 || calls[0].Session != "sess-2" {
-		t.Errorf("重试应使用新会话: %+v", calls)
+	if len(calls) != n {
+		t.Errorf("应有 %d 次成功调用，实际 %d", n, len(calls))
 	}
 }
 
 func TestClientMissingTokenEnv(t *testing.T) {
-	srv := httptest.NewServer(&fakeUpstream{})
+	srv := httptest.NewServer(newFake())
 	defer srv.Close()
 
 	cfg := testConfig(srv.URL)
@@ -266,7 +445,8 @@ func TestClientMissingTokenEnv(t *testing.T) {
 }
 
 func TestClientAuthFailure(t *testing.T) {
-	fake := &fakeUpstream{requireToken: "right"}
+	fake := newFake()
+	fake.requireToken = "right"
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -279,18 +459,118 @@ func TestClientAuthFailure(t *testing.T) {
 	}
 }
 
+func TestClientInitializedNotificationFailure(t *testing.T) {
+	fake := newFake()
+	fake.notifyStatus = http.StatusInternalServerError
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	_, err := NewClient(testConfig(srv.URL)).ListTools(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "initialized") {
+		t.Fatalf("initialized 通知失败应报错，实际: %v", err)
+	}
+}
+
+func TestClientRejectsNonObjectResult(t *testing.T) {
+	fake := newFake()
+	fake.tools = []Tool{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+	fake.badResult = true
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	_, err := NewClient(testConfig(srv.URL)).CallTool(context.Background(), "echo", nil)
+	if err == nil || !strings.Contains(err.Error(), "JSON 对象") {
+		t.Fatalf("非对象 result 应报错，实际: %v", err)
+	}
+}
+
+func TestClientRejectsTooManyTools(t *testing.T) {
+	fake := newFake()
+	for i := 0; i <= maxToolsPerUpstream; i++ {
+		fake.tools = append(fake.tools, Tool{Name: fmt.Sprintf("t%d", i), InputSchema: json.RawMessage(`{"type":"object"}`)})
+	}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	_, err := NewClient(testConfig(srv.URL)).ListTools(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "上限") {
+		t.Fatalf("工具数超限应报错，实际: %v", err)
+	}
+}
+
+func TestClientRejectsEndlessPagination(t *testing.T) {
+	fake := newFake()
+	fake.paginateForever = true
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	_, err := NewClient(testConfig(srv.URL)).ListTools(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "分页") {
+		t.Fatalf("无限分页应报错，实际: %v", err)
+	}
+}
+
+func TestReadLimitedRejectsOversize(t *testing.T) {
+	if _, err := readLimited(strings.NewReader("01234567890"), 10); err == nil {
+		t.Fatal("超过上限应报错")
+	}
+	got, err := readLimited(strings.NewReader("0123456789"), 10)
+	if err != nil || string(got) != "0123456789" {
+		t.Fatalf("恰好等于上限应通过: %q %v", got, err)
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	got := redactURL("https://user:pass@example.com:8443/mcp?token=secret#frag")
+	if got != "https://example.com:8443/mcp" {
+		t.Errorf("URL 应只保留 scheme+host+path，实际 %q", got)
+	}
+}
+
+func TestClientErrorHidesQuery(t *testing.T) {
+	c := NewClient(config.Upstream{URL: "http://127.0.0.1:1/mcp?token=secret", Timeout: 300 * time.Millisecond})
+	_, err := c.ListTools(context.Background())
+	if err == nil {
+		t.Fatal("连接失败应报错")
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Errorf("错误信息不应带 query: %v", err)
+	}
+	if !strings.Contains(err.Error(), "http://127.0.0.1:1/mcp") {
+		t.Errorf("错误信息应保留 scheme+host+path: %v", err)
+	}
+}
+
+func TestRetryDelay(t *testing.T) {
+	cases := []struct {
+		attempt  int
+		interval time.Duration
+		want     time.Duration
+	}{
+		{0, time.Hour, 5 * time.Second},
+		{1, time.Hour, 10 * time.Second},
+		{3, time.Hour, 40 * time.Second},
+		{10, time.Hour, time.Minute},
+		{0, 2 * time.Second, 2 * time.Second},
+	}
+	for _, c := range cases {
+		if got := retryDelay(c.attempt, c.interval); got != c.want {
+			t.Errorf("retryDelay(%d, %v) = %v，期望 %v", c.attempt, c.interval, got, c.want)
+		}
+	}
+}
+
 func TestManagerDefinitionsAndWhitelist(t *testing.T) {
-	fake := &fakeUpstream{
-		tools: []Tool{
-			{
-				Name:        "echo",
-				Title:       "回显",
-				Description: "上游描述",
-				InputSchema: json.RawMessage(`{"type":"object","properties":{"msg":{"type":"string"}},"required":["msg"]}`),
-				Annotations: json.RawMessage(`{"readOnlyHint":true}`),
-			},
-			{Name: "hidden", Description: "不在白名单里"},
+	fake := newFake()
+	fake.tools = []Tool{
+		{
+			Name:        "echo",
+			Title:       "回显",
+			Description: "上游描述",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"msg":{"type":"string"}},"required":["msg"]}`),
+			Annotations: json.RawMessage(`{"readOnlyHint":true}`),
 		},
+		{Name: "hidden", Description: "不在白名单里"},
 	}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
@@ -315,6 +595,9 @@ func TestManagerDefinitionsAndWhitelist(t *testing.T) {
 	// 白名单之外的工具即使上游存在也不会被注册；管理器只按白名单回答。
 	if hidden := m.Definition("fake", "hidden"); hidden.Name != "fk_hidden" || !strings.Contains(hidden.Description, "没有") {
 		t.Errorf("非白名单工具应给出占位定义: %+v", hidden)
+	}
+	if _, err := m.Call(context.Background(), "fake", "hidden", nil); err == nil || !strings.Contains(err.Error(), "白名单") {
+		t.Errorf("非白名单工具应拒绝调用，实际: %v", err)
 	}
 
 	res, err := m.Call(context.Background(), "fake", "echo", json.RawMessage(`{"msg":"x"}`))
@@ -352,9 +635,8 @@ func TestManagerUnreachableUpstream(t *testing.T) {
 }
 
 func TestManagerRefreshUpdatesDefinitions(t *testing.T) {
-	fake := &fakeUpstream{
-		tools: []Tool{{Name: "echo", Description: "第一版", InputSchema: json.RawMessage(`{"type":"object"}`)}},
-	}
+	fake := newFake()
+	fake.tools = []Tool{{Name: "echo", Description: "第一版", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -377,8 +659,41 @@ func TestManagerRefreshUpdatesDefinitions(t *testing.T) {
 	}
 }
 
+// TestManagerRejectsOversizedDefinition 验证超限时整次刷新失败，
+// 保留上一版定义而不是截断。
+func TestManagerRejectsOversizedDefinition(t *testing.T) {
+	fake := newFake()
+	fake.tools = []Tool{{Name: "echo", Description: "正常", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	m := New([]config.Upstream{testConfig(srv.URL)}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := m.RefreshAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	fake.mu.Lock()
+	fake.tools[0].Description = strings.Repeat("x", maxToolDescriptionBytes+1)
+	fake.mu.Unlock()
+	if err := m.RefreshAll(context.Background()); err == nil {
+		t.Fatal("description 超限应报错")
+	}
+	if got := m.Definition("fake", "echo").Description; got != "正常" {
+		t.Errorf("刷新失败时应保留上一版定义，实际 %q", got)
+	}
+
+	fake.mu.Lock()
+	fake.tools[0].Description = "正常"
+	fake.tools[0].InputSchema = json.RawMessage(`"` + strings.Repeat("x", maxToolSchemaBytes+1) + `"`)
+	fake.mu.Unlock()
+	if err := m.RefreshAll(context.Background()); err == nil || !strings.Contains(err.Error(), "inputSchema") {
+		t.Errorf("inputSchema 超限应报错，实际: %v", err)
+	}
+}
+
 func TestManagerStartAndClose(t *testing.T) {
-	fake := &fakeUpstream{tools: []Tool{{Name: "echo", Description: "ready", InputSchema: json.RawMessage(`{"type":"object"}`)}}}
+	fake := newFake()
+	fake.tools = []Tool{{Name: "echo", Description: "ready", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 

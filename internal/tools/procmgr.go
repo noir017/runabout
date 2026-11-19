@@ -140,11 +140,11 @@ func (p *Proc) markDone(exitCode int, err error) {
 func (p *Proc) Output() string { return p.out.String() }
 
 // TakeNew 返回自上次 TakeNew 以来新增的输出，并推进游标。
-// 游标必须在锁内推进：轮询长任务时多个 shell_output 调用会并发落到同一个 Proc 上。
+// 快照与游标必须在同一把锁内：否则并发时旧快照会让游标回退，重复交付输出。
 func (p *Proc) TakeNew() string {
-	full := p.Output()
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	full := p.Output()
 	if p.cursor > len(full) {
 		// 输出被截断过（capWriter 的头尾裁剪），游标失效，从头给。
 		p.cursor = 0

@@ -13,6 +13,13 @@ import (
 	"github.com/noir017/runabout/internal/mcp"
 )
 
+const (
+	// retryBaseDelay 是刷新失败后的首次重试间隔，之后指数退避。
+	retryBaseDelay = 5 * time.Second
+	// retryMaxDelay 是退避的上限。
+	retryMaxDelay = time.Minute
+)
+
 // Manager 持有所有上游连接与最近一次拉取到的工具定义。
 //
 // 对外暴露的工具集合由配置里的白名单决定，因此 tools/list 在启动瞬间
@@ -33,6 +40,8 @@ type Manager struct {
 type endpoint struct {
 	cfg    config.Upstream
 	client *Client
+	// allowed 是白名单集合，转发前再复查一次，避免绕过工具注册直接调用。
+	allowed map[string]bool
 
 	mu      sync.RWMutex
 	defs    map[string]mcp.ToolDef // 上游工具名 -> 对外定义
@@ -54,7 +63,15 @@ func New(cfgs []config.Upstream, log *slog.Logger) *Manager {
 		if cfg.RefreshInterval <= 0 {
 			cfg.RefreshInterval = 10 * time.Minute
 		}
-		ep := &endpoint{cfg: cfg, client: NewClient(cfg), defs: map[string]mcp.ToolDef{}}
+		ep := &endpoint{
+			cfg:     cfg,
+			client:  NewClient(cfg),
+			allowed: make(map[string]bool, len(cfg.Tools)),
+			defs:    map[string]mcp.ToolDef{},
+		}
+		for _, name := range cfg.Tools {
+			ep.allowed[name] = true
+		}
 		m.eps[cfg.Name] = ep
 		m.order = append(m.order, ep)
 	}
@@ -84,19 +101,48 @@ func (m *Manager) Close() {
 }
 
 func (m *Manager) loop(ctx context.Context, ep *endpoint) {
+	attempt := 0
 	for {
 		cctx, cancel := context.WithTimeout(ctx, ep.cfg.Timeout)
 		err := m.refresh(cctx, ep)
 		cancel()
-		if err != nil && ctx.Err() == nil {
-			m.log.Warn("拉取上游工具列表失败", "upstream", ep.cfg.Name, "err", err)
+
+		wait := ep.cfg.RefreshInterval
+		if err != nil {
+			if ctx.Err() == nil {
+				m.log.Warn("拉取上游工具列表失败", "upstream", ep.cfg.Name, "err", err)
+			}
+			// 失败后短退避重试，不等满 refresh_interval。
+			wait = retryDelay(attempt, ep.cfg.RefreshInterval)
+			attempt++
+		} else {
+			attempt = 0
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(ep.cfg.RefreshInterval):
+		case <-time.After(wait):
 		}
 	}
+}
+
+// retryDelay 计算第 attempt 次失败后的等待时间：从 5s 指数退避到 1m，
+// 且不超过正常的刷新间隔。
+func retryDelay(attempt int, interval time.Duration) time.Duration {
+	d := retryBaseDelay
+	for i := 0; i < attempt && d < retryMaxDelay; i++ {
+		d *= 2
+	}
+	if d > retryMaxDelay {
+		d = retryMaxDelay
+	}
+	if interval > 0 && d > interval {
+		d = interval
+	}
+	if d <= 0 {
+		d = retryBaseDelay
+	}
+	return d
 }
 
 // RefreshAll 同步刷新所有上游，主要供测试与自检使用。
@@ -117,15 +163,26 @@ func (m *Manager) refresh(ctx context.Context, ep *endpoint) error {
 	if err != nil {
 		return err
 	}
+	if len(tools) > maxToolsPerUpstream {
+		return fmt.Errorf("上游返回 %d 个工具，超过 %d 上限", len(tools), maxToolsPerUpstream)
+	}
 	byName := make(map[string]Tool, len(tools))
 	for _, t := range tools {
 		byName[t.Name] = t
 	}
 	defs := make(map[string]mcp.ToolDef, len(ep.cfg.Tools))
 	for _, name := range ep.cfg.Tools {
-		if t, ok := byName[name]; ok {
-			defs[name] = ep.buildDef(t)
+		t, ok := byName[name]
+		if !ok {
+			continue
 		}
+		if len(t.Description) > maxToolDescriptionBytes {
+			return fmt.Errorf("工具 %s 的 description 超过 %d 字节上限", name, maxToolDescriptionBytes)
+		}
+		if len(t.InputSchema) > maxToolSchemaBytes {
+			return fmt.Errorf("工具 %s 的 inputSchema 超过 %d 字节上限", name, maxToolSchemaBytes)
+		}
+		defs[name] = ep.buildDef(t)
 	}
 	ep.mu.Lock()
 	ep.defs = defs
@@ -160,6 +217,9 @@ func (m *Manager) Call(ctx context.Context, upstreamName, tool string, args json
 	ep := m.eps[upstreamName]
 	if ep == nil {
 		return nil, fmt.Errorf("未知上游 %q", upstreamName)
+	}
+	if !ep.allowed[tool] {
+		return nil, fmt.Errorf("工具 %s 不在上游 %s 的白名单里", tool, upstreamName)
 	}
 	cctx, cancel := context.WithTimeout(ctx, ep.cfg.Timeout)
 	defer cancel()
