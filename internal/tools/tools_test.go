@@ -7,9 +7,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/noir017/runabout/internal/audit"
@@ -559,5 +562,94 @@ func TestProcTakeNewTruncationOnRuneBoundary(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "界"+strings.Repeat("b", 5)) {
 		t.Fatalf("tail 开头不完整的字符应丢掉: %q", got)
+	}
+}
+
+// Write 把汉字切成两次写入时游标会落在字符中间：TakeNew 必须跳到下一个
+// 完整字符，跳过的续字节要写进省略提示，不能返回非法 UTF-8。
+func TestProcTakeNewCursorInsideRune(t *testing.T) {
+	p := &Proc{ID: "proc_utf8_cursor", out: newCapWriter(1 << 10)}
+	// "你" = E4 BD A0，先写前两个字节，游标随之停在这两个字节之后。
+	p.out.Write([]byte{0xE4, 0xBD})
+	p.TakeNew()
+	// 再写最后一个字节和后续内容，此时游标正好落在续字节上。
+	p.out.Write([]byte{0xA0, 'o', 'k'})
+	got := p.TakeNew()
+	if !utf8.ValidString(got) {
+		t.Fatalf("输出必须是合法 UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "ok") {
+		t.Fatalf("跳过的续字节之后的内容应完整返回: %q", got)
+	}
+	if !strings.Contains(got, "…（中间省略 1 字节，共 5 字节）…") {
+		t.Fatalf("跳过的续字节必须写进省略提示: %q", got)
+	}
+}
+
+// 并发写入且输出已被截断：游标必须单调推进，每个字节要么交付要么计入
+// 省略，-race 下不能报数据竞争。
+func TestProcTakeNewConcurrentWithTruncation(t *testing.T) {
+	const (
+		writers = 4
+		chunks  = 100
+		chunk   = "abcdefghij"
+	)
+	p := &Proc{ID: "proc_trunc_race", out: newCapWriter(16)}
+	// 先写到超过 cap，保证后续每次读取都跨在缺口上。
+	p.out.Write([]byte(strings.Repeat(chunk, 2)))
+	prefill := 2 * len(chunk)
+
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < chunks; j++ {
+				p.out.Write([]byte(chunk))
+			}
+		}()
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	marker := regexp.MustCompile(`\n?…（中间省略 (\d+) 字节，共 \d+ 字节）…\n`)
+	delivered, skipped := 0, 0
+	consume := func(out string) {
+		for _, m := range marker.FindAllStringSubmatch(out, -1) {
+			n, err := strconv.Atoi(m[1])
+			if err != nil {
+				t.Fatalf("无法解析省略字节数: %q", out)
+			}
+			skipped += n
+		}
+		rest := marker.ReplaceAllString(out, "")
+		if strings.IndexFunc(rest, func(r rune) bool { return r < 'a' || r > 'j' }) >= 0 {
+			t.Fatalf("正文只能来自写入的字符，标记必须完整: %q", out)
+		}
+		delivered += len(rest)
+	}
+
+	for {
+		if out := p.TakeNew(); out != "" {
+			consume(out)
+			continue
+		}
+		select {
+		case <-done:
+			// 写完后再读一次，把最后一段收干净。
+			if out := p.TakeNew(); out != "" {
+				consume(out)
+				continue
+			}
+			if want := prefill + writers*chunks*len(chunk); delivered+skipped != want {
+				t.Fatalf("交付 %d + 跳过 %d != 写入 %d", delivered, skipped, want)
+			}
+			if !p.out.Truncated() || skipped == 0 {
+				t.Fatalf("用例应触发截断并跳过字节: truncated=%v skipped=%d", p.out.Truncated(), skipped)
+			}
+			return
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 }
