@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/noir017/runabout/internal/audit"
 	"github.com/noir017/runabout/internal/config"
@@ -490,5 +491,73 @@ func TestProcTakeNewIsIncrementalAndRaceFree(t *testing.T) {
 	seen += len(p.TakeNew())
 	if seen != 16 {
 		t.Fatalf("8 个 goroutine 各写 2 字节，累计交付应为 16，得到 %d", seen)
+	}
+}
+
+// 输出超过上限被头尾裁剪后，only_new 仍要拿到全部新内容。
+// 游标必须用绝对写入偏移，不能用快照字符串的下标。
+func TestProcTakeNewKeepsNewOutputAfterTruncation(t *testing.T) {
+	p := &Proc{ID: "proc_trunc", out: newCapWriter(20)}
+
+	p.out.Write([]byte(strings.Repeat("a", 20)))
+	if got, want := p.TakeNew(), strings.Repeat("a", 20); got != want {
+		t.Fatalf("首段应完整返回: got %q", got)
+	}
+	p.out.Write([]byte(strings.Repeat("b", 10)))
+	if got, want := p.TakeNew(), strings.Repeat("b", 10); got != want {
+		t.Fatalf("截断后新写入的 b 不能丢: got %q", got)
+	}
+	p.out.Write([]byte(strings.Repeat("c", 10)))
+	if got, want := p.TakeNew(), strings.Repeat("c", 10); got != want {
+		t.Fatalf("再次截断后新写入的 c 不能丢: got %q", got)
+	}
+	if got := p.TakeNew(); got != "" {
+		t.Fatalf("没有新输出时应为空: %q", got)
+	}
+}
+
+// 新内容已被裁掉一部分时不能静默丢弃：必须说明丢了多少字节，
+// 并返回仍然保留的那部分。
+func TestProcTakeNewReportsLostBytesAfterTruncation(t *testing.T) {
+	p := &Proc{ID: "proc_trunc_loss", out: newCapWriter(20)}
+
+	p.out.Write([]byte(strings.Repeat("a", 20)))
+	p.TakeNew() // 游标推进到 20
+	// total=40：保留 head=[0,10)、tail=[30,40)，游标 20 落在缺口里。
+	p.out.Write([]byte(strings.Repeat("b", 20)))
+	got := p.TakeNew()
+	if !strings.Contains(got, "…（中间省略 10 字节，共 40 字节）…") {
+		t.Fatalf("应完整写出丢失的字节数: %q", got)
+	}
+	if !strings.HasSuffix(got, strings.Repeat("b", 10)) {
+		t.Fatalf("应返回仍然保留的新内容: %q", got)
+	}
+}
+
+// 截断点落在多字节字符中间时，输出必须是合法 UTF-8，不能出现半个汉字。
+func TestProcTakeNewTruncationOnRuneBoundary(t *testing.T) {
+	// 上限 20：head 取前 10 字节，切在"界"（第 9-11 字节）中间。
+	p := &Proc{ID: "proc_utf8_head", out: newCapWriter(20)}
+	p.out.Write([]byte("你好世界" + strings.Repeat("x", 20)))
+	got := p.TakeNew()
+	if !utf8.ValidString(got) {
+		t.Fatalf("输出必须是合法 UTF-8: %q", got)
+	}
+	if !strings.HasPrefix(got, "你好世") {
+		t.Fatalf("head 末尾的半个字符应整段丢掉: %q", got)
+	}
+	if !strings.Contains(got, "…（中间省略 13 字节，共 32 字节）…") {
+		t.Fatalf("省略标记应完整且字节数正确: %q", got)
+	}
+
+	// 上限 20：tail 从 [17,27) 开始，起点切在"世"（第 16-18 字节）中间。
+	p2 := &Proc{ID: "proc_utf8_tail", out: newCapWriter(20)}
+	p2.out.Write([]byte(strings.Repeat("a", 10) + "你好世界" + strings.Repeat("b", 5)))
+	got = p2.TakeNew()
+	if !utf8.ValidString(got) {
+		t.Fatalf("输出必须是合法 UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "界"+strings.Repeat("b", 5)) {
+		t.Fatalf("tail 开头不完整的字符应丢掉: %q", got)
 	}
 }
