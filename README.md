@@ -110,6 +110,7 @@ upstreams:
 
 - The tool list is fetched in the background at startup and refreshed every `refresh_interval`. Descriptions, titles and `inputSchema` come from the upstream.
 - Only whitelisted tools are exposed. The exposed name set is fixed by config, so `tools/list` stays stable even while the upstream is down.
+- Tool definitions are size-bounded. A single `tools/list` page is capped at 4 MiB and all pages together at 32 MiB; each tool's name, title, description and `inputSchema` are checked as soon as the page is decoded (128 B / 1 KiB / 64 KiB / 256 KiB). A whitelisted tool that exceeds a limit is skipped for that refresh only: it keeps its previous definition (or a placeholder if there is none), other tools still update, and runabout logs one warning per tool instead of failing the whole refresh.
 - `tools/call` is forwarded verbatim, and the upstream result is returned unchanged, including content blocks and fields runabout does not model.
 - Tokens are read from the named environment variable at request time. Do not put credentials in the config file.
 - An unreachable upstream only makes its own tools return an error; runabout's built-in tools are unaffected.
