@@ -39,6 +39,8 @@ type Spec struct {
 	MaxOutputBytes int
 	// MergeStderr 把 stderr 并进 stdout，后台任务按时间顺序读输出时需要。
 	MergeStderr bool
+	// Binary 按原始字节收集输出，不做 UTF-8 对齐；读取任意文件时用。
+	Binary bool
 }
 
 // Result 是一次前台执行的结果。

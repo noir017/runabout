@@ -7,9 +7,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/noir017/runabout/internal/audit"
 	"github.com/noir017/runabout/internal/config"
@@ -490,5 +495,185 @@ func TestProcTakeNewIsIncrementalAndRaceFree(t *testing.T) {
 	seen += len(p.TakeNew())
 	if seen != 16 {
 		t.Fatalf("8 个 goroutine 各写 2 字节，累计交付应为 16，得到 %d", seen)
+	}
+}
+
+// 输出超过上限被头尾裁剪后，only_new 仍要拿到全部新内容。
+// 游标必须用绝对写入偏移，不能用快照字符串的下标。
+func TestProcTakeNewKeepsNewOutputAfterTruncation(t *testing.T) {
+	p := &Proc{ID: "proc_trunc", out: newCapWriter(20)}
+
+	p.out.Write([]byte(strings.Repeat("a", 20)))
+	if got, want := p.TakeNew(), strings.Repeat("a", 20); got != want {
+		t.Fatalf("首段应完整返回: got %q", got)
+	}
+	p.out.Write([]byte(strings.Repeat("b", 10)))
+	if got, want := p.TakeNew(), strings.Repeat("b", 10); got != want {
+		t.Fatalf("截断后新写入的 b 不能丢: got %q", got)
+	}
+	p.out.Write([]byte(strings.Repeat("c", 10)))
+	if got, want := p.TakeNew(), strings.Repeat("c", 10); got != want {
+		t.Fatalf("再次截断后新写入的 c 不能丢: got %q", got)
+	}
+	if got := p.TakeNew(); got != "" {
+		t.Fatalf("没有新输出时应为空: %q", got)
+	}
+}
+
+// 新内容已被裁掉一部分时不能静默丢弃：必须说明丢了多少字节，
+// 并返回仍然保留的那部分。
+func TestProcTakeNewReportsLostBytesAfterTruncation(t *testing.T) {
+	p := &Proc{ID: "proc_trunc_loss", out: newCapWriter(20)}
+
+	p.out.Write([]byte(strings.Repeat("a", 20)))
+	p.TakeNew() // 游标推进到 20
+	// total=40：保留 head=[0,10)、tail=[30,40)，游标 20 落在缺口里。
+	p.out.Write([]byte(strings.Repeat("b", 20)))
+	got := p.TakeNew()
+	if !strings.Contains(got, "…（中间省略 10 字节，共 40 字节）…") {
+		t.Fatalf("应完整写出丢失的字节数: %q", got)
+	}
+	if !strings.HasSuffix(got, strings.Repeat("b", 10)) {
+		t.Fatalf("应返回仍然保留的新内容: %q", got)
+	}
+}
+
+// 截断点落在多字节字符中间时，输出必须是合法 UTF-8，不能出现半个汉字。
+func TestProcTakeNewTruncationOnRuneBoundary(t *testing.T) {
+	// 上限 20：head 取前 10 字节，切在"界"（第 9-11 字节）中间。
+	p := &Proc{ID: "proc_utf8_head", out: newCapWriter(20)}
+	p.out.Write([]byte("你好世界" + strings.Repeat("x", 20)))
+	got := p.TakeNew()
+	if !utf8.ValidString(got) {
+		t.Fatalf("输出必须是合法 UTF-8: %q", got)
+	}
+	if !strings.HasPrefix(got, "你好世") {
+		t.Fatalf("head 末尾的半个字符应整段丢掉: %q", got)
+	}
+	if !strings.Contains(got, "…（中间省略 13 字节，共 32 字节）…") {
+		t.Fatalf("省略标记应完整且字节数正确: %q", got)
+	}
+
+	// 上限 20：tail 从 [17,27) 开始，起点切在"世"（第 16-18 字节）中间。
+	p2 := &Proc{ID: "proc_utf8_tail", out: newCapWriter(20)}
+	p2.out.Write([]byte(strings.Repeat("a", 10) + "你好世界" + strings.Repeat("b", 5)))
+	got = p2.TakeNew()
+	if !utf8.ValidString(got) {
+		t.Fatalf("输出必须是合法 UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "界"+strings.Repeat("b", 5)) {
+		t.Fatalf("tail 开头不完整的字符应丢掉: %q", got)
+	}
+}
+
+// Write 把汉字切成两次写入时游标会落在字符中间：TakeNew 必须跳到下一个
+// 完整字符，跳过的续字节要写进省略提示，不能返回非法 UTF-8。
+func TestProcTakeNewCursorInsideRune(t *testing.T) {
+	p := &Proc{ID: "proc_utf8_cursor", out: newCapWriter(1 << 10)}
+	// "你" = E4 BD A0，先写前两个字节，游标随之停在这两个字节之后。
+	p.out.Write([]byte{0xE4, 0xBD})
+	p.TakeNew()
+	// 再写最后一个字节和后续内容，此时游标正好落在续字节上。
+	p.out.Write([]byte{0xA0, 'o', 'k'})
+	got := p.TakeNew()
+	if !utf8.ValidString(got) {
+		t.Fatalf("输出必须是合法 UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "ok") {
+		t.Fatalf("跳过的续字节之后的内容应完整返回: %q", got)
+	}
+	if !strings.Contains(got, "…（中间省略 1 字节，共 5 字节）…") {
+		t.Fatalf("跳过的续字节必须写进省略提示: %q", got)
+	}
+}
+
+// 并发写入且输出已被截断：游标必须单调推进，每个字节要么交付要么计入
+// 省略，-race 下不能报数据竞争。读者先启动、写者每写一块让出调度，
+// 保证读写真正交错；旧实现（字符串下标当游标）只能读到一两次，
+// 会卡在非空读取次数上。
+func TestProcTakeNewConcurrentWithTruncation(t *testing.T) {
+	const (
+		writers  = 4
+		chunks   = 100
+		chunk    = "abcdefghij"
+		minReads = 10
+	)
+	p := &Proc{ID: "proc_trunc_race", out: newCapWriter(16)}
+	// 先写到超过 cap，保证后续每次读取都跨在缺口上。
+	p.out.Write([]byte(strings.Repeat(chunk, 2)))
+	prefill := 2 * len(chunk)
+
+	writersDone := make(chan struct{})
+	readerReady := make(chan struct{})
+	reads := make(chan string, 1<<16)
+	go func() {
+		defer close(reads)
+		ready := false
+		for {
+			if out := p.TakeNew(); out != "" {
+				reads <- out
+				if !ready {
+					close(readerReady)
+					ready = true
+				}
+				continue
+			}
+			select {
+			case <-writersDone:
+				// 写完后再读一次，把最后一段收干净。
+				if out := p.TakeNew(); out != "" {
+					reads <- out
+					continue
+				}
+				return
+			default:
+				runtime.Gosched()
+			}
+		}
+	}()
+	// 等读者先拿到预填内容，再开始写，避免第一次读已经在全部写完之后。
+	<-readerReady
+
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < chunks; j++ {
+				p.out.Write([]byte(chunk))
+				// 让读者有机会在两次写入之间读到增量；只用 Gosched
+				// 时写者仍可能在读者被调度前跑完。
+				time.Sleep(time.Millisecond)
+			}
+		}()
+	}
+	wg.Wait()
+	close(writersDone)
+
+	marker := regexp.MustCompile(`\n?…（中间省略 (\d+) 字节，共 \d+ 字节）…\n`)
+	delivered, skipped, nonEmpty := 0, 0, 0
+	for out := range reads {
+		nonEmpty++
+		for _, m := range marker.FindAllStringSubmatch(out, -1) {
+			n, err := strconv.Atoi(m[1])
+			if err != nil {
+				t.Fatalf("无法解析省略字节数: %q", out)
+			}
+			skipped += n
+		}
+		rest := marker.ReplaceAllString(out, "")
+		if strings.IndexFunc(rest, func(r rune) bool { return r < 'a' || r > 'j' }) >= 0 {
+			t.Fatalf("正文只能来自写入的字符，标记必须完整: %q", out)
+		}
+		delivered += len(rest)
+	}
+	if nonEmpty < minReads {
+		t.Fatalf("非空读取只有 %d 次（< %d），读写没有真正交错", nonEmpty, minReads)
+	}
+	if want := prefill + writers*chunks*len(chunk); delivered+skipped != want {
+		t.Fatalf("交付 %d + 跳过 %d != 写入 %d", delivered, skipped, want)
+	}
+	if !p.out.Truncated() || skipped == 0 {
+		t.Fatalf("用例应触发截断并跳过字节: truncated=%v skipped=%d", p.out.Truncated(), skipped)
 	}
 }

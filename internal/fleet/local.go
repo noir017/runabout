@@ -55,12 +55,12 @@ func (l *Local) command(ctx context.Context, spec Spec, merge bool) (*exec.Cmd, 
 		cmd.Stdin = strings.NewReader(spec.Stdin)
 	}
 	limit := spec.MaxOutputBytes
-	out := NewCapWriter(limit)
+	out := newCapWriter(limit, spec.Binary)
 	var errOut *CapWriter
 	if merge {
 		errOut = out
 	} else {
-		errOut = NewCapWriter(limit)
+		errOut = newCapWriter(limit, spec.Binary)
 	}
 	cmd.Stdout, cmd.Stderr = out, errOut
 	return cmd, out, errOut

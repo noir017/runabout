@@ -28,7 +28,7 @@ type Proc struct {
 	done chan struct{}
 
 	mu       sync.Mutex
-	cursor   int // shell_output 已读到的位置，受 mu 保护
+	cursor   int // shell_output 已读到的绝对字节偏移，受 mu 保护
 	finished bool
 	ended    time.Time
 	exitCode int
@@ -140,17 +140,14 @@ func (p *Proc) markDone(exitCode int, err error) {
 func (p *Proc) Output() string { return p.out.String() }
 
 // TakeNew 返回自上次 TakeNew 以来新增的输出，并推进游标。
+// 游标是 capWriter 的绝对写入偏移，不是快照字符串的下标：输出被截断后，
+// 省略标记和 tail 的位置都会变化，字符串下标会指向错误的字节，导致漏输出。
 // 快照与游标必须在同一把锁内：否则并发时旧快照会让游标回退，重复交付输出。
 func (p *Proc) TakeNew() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	full := p.Output()
-	if p.cursor > len(full) {
-		// 输出被截断过（capWriter 的头尾裁剪），游标失效，从头给。
-		p.cursor = 0
-	}
-	out := full[p.cursor:]
-	p.cursor = len(full)
+	out, _, next := p.out.Since(p.cursor)
+	p.cursor = next
 	return out
 }
 
