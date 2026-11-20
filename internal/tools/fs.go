@@ -51,12 +51,12 @@ func (t *readTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 - 其他二进制文件会被拒绝，请改用 shell 里的 xxd/file。
 - 少数凭据类文件（私钥、云凭据等）被策略禁止读取，会返回明确错误。`,
 			fs.DefaultLines, fs.MaxLineChars, fs.ImageMaxEdge, humanBytes(int64(fs.MaxImageBytes)), remoteDoc),
-		InputSchema: schema(t.d.withTargetFor(p, map[string]any{
+		InputSchema: t.d.schemaWithTargetFor(p, map[string]any{
 			"path":   strProp("文件路径，绝对或相对（相对于默认工作目录）"),
 			"offset": intProp("起始行号，从 1 开始", 1, 0),
 			"limit":  intProp("最多读取多少行", 1, 0),
 			"raw":    boolProp("不输出行号"),
-		}), "path"),
+		}, "path"),
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    mcp.Ptr(true),
 			IdempotentHint:  mcp.Ptr(true),

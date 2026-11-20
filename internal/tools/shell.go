@@ -36,9 +36,20 @@ func (t *shellTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 	cfg := t.d.Cfg.Tools.Shell
 	targetDoc := ""
 	if t.d.fleetEnabled() {
-		targetDoc = "\ntarget 决定在哪台机器上执行，默认 local（runabout 所在容器）。" +
-			"\n本机用 bash；远端由目标机器的登录 shell 执行，命令要保持 POSIX sh 兼容。" +
-			"\n远端默认工作目录是机器配置的 workdir，没配就是登录用户的家目录。"
+		var head string
+		switch def := t.d.defaultTargetFor(p); def {
+		case fleet.LocalTarget:
+			head = "\ntarget 决定在哪台机器上执行，默认 local（runabout 所在容器）。"
+		case "":
+			head = "\ntarget 必填，决定在哪台机器上执行。"
+		default:
+			head = fmt.Sprintf("\ntarget 决定在哪台机器上执行，默认 %s。", def)
+		}
+		shellNote := "\n远端由目标机器的登录 shell 执行，命令要保持 POSIX sh 兼容。"
+		if t.d.fleetOrLocal().ExposeLocal() && p.AllowsTarget(fleet.LocalTarget) {
+			shellNote = "\n本机用 bash；远端由目标机器的登录 shell 执行，命令要保持 POSIX sh 兼容。"
+		}
+		targetDoc = head + shellNote + "\n远端默认工作目录是机器配置的 workdir，没配就是登录用户的家目录。"
 	}
 	return mcp.ToolDef{
 		Name:  "shell",
@@ -63,7 +74,7 @@ func (t *shellTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
   confirm_token，确认这确实是你要做的事之后，带着同一条命令和该 token 再调用一次即可执行。
   token 一次性、限时，且只对签发它的那条命令和目标机器有效。`,
 			targetDoc, cfg.Path, cfg.DefaultWorkdir, cfg.DefaultTimeout, cfg.MaxTimeout, cfg.MaxOutputBytes),
-		InputSchema: schema(t.d.withTargetFor(p, map[string]any{
+		InputSchema: t.d.schemaWithTargetFor(p, map[string]any{
 			"command":           strProp("要执行的 bash 命令"),
 			"workdir":           strProp("工作目录，默认 " + cfg.DefaultWorkdir),
 			"timeout_ms":        intProp("超时毫秒数，默认 "+cfg.DefaultTimeout.String(), 100, int(cfg.MaxTimeout.Milliseconds())),
@@ -72,7 +83,7 @@ func (t *shellTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 			"run_in_background": boolProp("丢到后台运行，立即返回进程 id"),
 			"label":             strProp("后台任务的备注名，便于在 shell_list 里辨认"),
 			"confirm_token":     strProp("二次确认令牌：仅当上一次调用因高风险被拦下时填入"),
-		}), "command"),
+		}, "command"),
 		Annotations: &mcp.ToolAnnotations{
 			Title:           "执行 shell 命令",
 			DestructiveHint: mcp.Ptr(true),

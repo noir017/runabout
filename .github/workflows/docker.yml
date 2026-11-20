@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   build:
-    name: Build (${{ matrix.arch }})
+    name: Build (${{ matrix.variant }}/${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -33,10 +33,20 @@ jobs:
       matrix:
         include:
           # 各架构用原生 runner，避开 QEMU。本镜像 apt 包多，模拟会极慢。
-          - platform: linux/amd64
+          - variant: full
+            platform: linux/amd64
             arch: amd64
             runner: ubuntu-24.04
-          - platform: linux/arm64
+          - variant: full
+            platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - variant: gateway
+            platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - variant: gateway
+            platform: linux/arm64
             arch: arm64
             runner: ubuntu-24.04-arm
     steps:
@@ -74,14 +84,15 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile
+          target: ${{ matrix.variant }}
           platforms: ${{ matrix.platform }}
           build-args: |
             VERSION=${{ env.VERSION }}
           labels: ${{ steps.meta.outputs.labels }}
           # mode=max 会带上中间层，以及 Dockerfile 里的 Go module / go-build cache mount。
           # scope 按架构分开，避免 amd64 和 arm64 互相覆盖。
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.arch }}
           # PR 只把缓存写回 GHA，不往 Packages 推。
           # 其它事件按 digest 推，tag 留给 merge job 合成多架构清单。
           outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) }}
@@ -99,16 +110,20 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.arch }}
+          name: digests-${{ matrix.variant }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    name: Merge and publish
+    name: Merge and publish (${{ matrix.variant }})
     needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [full, gateway]
     permissions:
       contents: read
       packages: write
@@ -120,7 +135,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digests-*
+          pattern: digests-${{ matrix.variant }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -132,11 +147,12 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
+            type=raw,value=latest,enable=${{ matrix.variant == 'full' && github.ref_name == github.event.repository.default_branch }}
+            type=raw,value=gateway,enable=${{ matrix.variant == 'gateway' && github.ref_name == github.event.repository.default_branch }}
+            type=ref,event=branch,prefix=${{ matrix.variant == 'gateway' && 'gateway-' || '' }}
+            type=semver,pattern={{version}},prefix=${{ matrix.variant == 'gateway' && 'gateway-' || '' }}
+            type=semver,pattern={{major}}.{{minor}},prefix=${{ matrix.variant == 'gateway' && 'gateway-' || '' }}
+            type=sha,prefix=${{ matrix.variant == 'gateway' && 'gateway-' || '' }}
 
       - name: Log in to GHCR
         uses: docker/login-action@v4

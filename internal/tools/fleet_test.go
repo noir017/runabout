@@ -513,6 +513,60 @@ func TestTargetParamIsSimpleEnum(t *testing.T) {
 	}
 }
 
+func TestFleetExposeLocalFalseTools(t *testing.T) {
+	noLocal := false
+
+	t.Run("无 default_target 时 target 必填且不含 local", func(t *testing.T) {
+		d, _ := newFleetDeps(t, config.Fleet{ExposeLocal: &noLocal})
+		def := (&shellTool{d: d}).Definition()
+		sc := def.InputSchema.(map[string]any)
+		props := sc["properties"].(map[string]any)
+		tp := props["target"].(map[string]any)
+		enum := tp["enum"].([]string)
+		if len(enum) != 1 || enum[0] != "web1" {
+			t.Fatalf("关闭 local 后 enum 应只有 web1: %v", enum)
+		}
+		req := sc["required"].([]string)
+		hasTarget := false
+		for _, r := range req {
+			if r == "target" {
+				hasTarget = true
+			}
+		}
+		if !hasTarget {
+			t.Fatalf("无 default_target 时 target 必须在 required 中: %v", req)
+		}
+		if strings.Contains(def.Description, "默认 local") || strings.Contains(def.Description, "本机用 bash") {
+			t.Errorf("关闭 local 后描述不应再提默认 local 或本机 bash: %s", def.Description)
+		}
+		if out, isErr := call(t, &shellTool{d: d}, map[string]any{"command": "echo hi"}); !isErr || !strings.Contains(out, "未指定 target") {
+			t.Fatalf("漏传 target 应报错，实际 isErr=%v out=%s", isErr, out)
+		}
+		if out, isErr := call(t, &shellTool{d: d}, map[string]any{"target": "local", "command": "echo hi"}); !isErr {
+			t.Fatalf("显式传 local 应报错，实际 out=%s", out)
+		}
+	})
+
+	t.Run("配置 default_target 时缺省自动走远端", func(t *testing.T) {
+		d, _ := newFleetDeps(t, config.Fleet{ExposeLocal: &noLocal, DefaultTarget: "web1"})
+		def := (&shellTool{d: d}).Definition()
+		sc := def.InputSchema.(map[string]any)
+		req := sc["required"].([]string)
+		for _, r := range req {
+			if r == "target" {
+				t.Fatalf("有 default_target 时 target 不应必填: %v", req)
+			}
+		}
+		if !strings.Contains(def.Description, "默认 web1") {
+			t.Errorf("描述应体现默认 web1: %s", def.Description)
+		}
+		out, isErr := call(t, &shellTool{d: d}, map[string]any{"command": "echo hello-default"})
+		if isErr || !strings.Contains(out, "[web1]") || !strings.Contains(out, "hello-default") {
+			t.Fatalf("缺省 target 应在 web1 上执行，实际 isErr=%v out=%s", isErr, out)
+		}
+	})
+}
+
 func TestAuditRecordsTarget(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Default()

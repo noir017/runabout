@@ -273,6 +273,65 @@ func TestDataDirIsProtected(t *testing.T) {
 	}
 }
 
+func TestFleetExposeLocalAndDefaultTarget(t *testing.T) {
+	boolPtr := func(v bool) *bool { return &v }
+
+	t.Run("expose_local=false 且无 hosts 报错", func(t *testing.T) {
+		cfg := Default()
+		cfg.Auth.Enabled = false
+		cfg.Fleet.ExposeLocal = boolPtr(false)
+		if err := cfg.Normalize(); err == nil {
+			t.Fatal("expose_local=false 且无 hosts 应报错")
+		}
+	})
+
+	t.Run("expose_local=false 且 default_target=local 报错", func(t *testing.T) {
+		cfg := Default()
+		cfg.Auth.Enabled = false
+		cfg.Fleet.ExposeLocal = boolPtr(false)
+		cfg.Fleet.DefaultTarget = "local"
+		cfg.Fleet.Hosts = []FleetHost{{Name: "web1"}}
+		if err := cfg.Normalize(); err == nil {
+			t.Fatal("expose_local=false 时 default_target 不能为 local")
+		}
+	})
+
+	t.Run("default_target 不在 hosts 中报错", func(t *testing.T) {
+		cfg := Default()
+		cfg.Auth.Enabled = false
+		cfg.Fleet.ExposeLocal = boolPtr(false)
+		cfg.Fleet.DefaultTarget = "ghost"
+		cfg.Fleet.Hosts = []FleetHost{{Name: "web1"}}
+		if err := cfg.Normalize(); err == nil {
+			t.Fatal("未知 default_target 应报错")
+		}
+	})
+
+	t.Run("expose_local=false 时 allowed_targets 含 local 报错", func(t *testing.T) {
+		cfg := Default()
+		cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x", AllowedTargets: []string{"local"}}}
+		cfg.Fleet.ExposeLocal = boolPtr(false)
+		cfg.Fleet.Hosts = []FleetHost{{Name: "web1"}}
+		if err := cfg.Normalize(); err == nil {
+			t.Fatal("expose_local=false 时 allowed_targets 不应接受 local")
+		}
+	})
+
+	t.Run("expose_local=false + 合法 default_target 通过", func(t *testing.T) {
+		cfg := Default()
+		cfg.Auth.Enabled = false
+		cfg.Fleet.ExposeLocal = boolPtr(false)
+		cfg.Fleet.DefaultTarget = "web1"
+		cfg.Fleet.Hosts = []FleetHost{{Name: "web1"}}
+		if err := cfg.Normalize(); err != nil {
+			t.Fatalf("合法配置不应报错: %v", err)
+		}
+		if cfg.Fleet.LocalExposed() {
+			t.Error("LocalExposed 应为 false")
+		}
+	})
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0)
 }

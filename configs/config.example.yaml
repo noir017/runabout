@@ -138,6 +138,12 @@ fleet:
   # 不写 hosts 就是单机模式：工具里不会出现 target 参数，行为和以前一样。
   # 写了 hosts 之后，shell / read / search / glob / apply_patch 都会多一个 target，
   # enum 里列出下面所有机器名，默认 local（runabout 所在的容器）。
+  #
+  # 纯远端网关模式（宿主机裸跑或极简容器）：把 expose_local 设为 false，
+  # local 不会出现在 target 枚举与 servers 中，也不依赖本机 bash。
+  # 可再配 default_target 指定默认远端机；留空则每次调用必须显式传 target。
+  # expose_local: false
+  # default_target: "web1"
   ssh_command: ["ssh", "-o", "BatchMode=yes"]
   # servers 总览里单台机器的探测超时。
   probe_timeout: 10s

@@ -1,5 +1,11 @@
 # 裸机部署用的 systemd 单元。放到 /etc/systemd/system/ 后：
 #   systemctl daemon-reload && systemctl enable --now runabout
+#
+# 同时支持两种裸机形态：
+# 1. 单机模式：给 agent 分配工作区目录，按需放开文件权限；
+# 2. 纯远端网关模式（fleet.expose_local: false）：不需要 /srv/workspace 与本机 bash，
+#    只需宿主机自带 ssh 与 /bin/sh，可把下方 ProtectSystem=strict 与 ReadWritePaths 注释打开，
+#    把进程写权限收紧到状态目录与 SSH ControlMaster 目录。
 [Unit]
 Description=runabout (MCP server exposing shell/file tools to agents)
 Documentation=https://github.com/noir017/runabout
@@ -12,6 +18,7 @@ Type=simple
 # 建议专门建一个用户，需要的权限通过 sudoers 精确授予，而不是直接 root。
 User=agent
 Group=agent
+# 纯远端网关模式下可改为 /var/lib/runabout，无需单独建工作区目录。
 WorkingDirectory=/srv/workspace
 ExecStart=/usr/local/bin/runabout serve -c /etc/runabout/config.yaml
 Restart=on-failure
@@ -25,6 +32,9 @@ StateDirectoryMode=0700
 
 # 适度加固。注意别开 ProtectHome/ProtectSystem=strict：
 # 这个服务本来就是要读写机器上的文件，锁太死会让它没法干活。
+# 若启用了纯远端网关模式（fleet.expose_local: false），可取消下面两行注释进一步收紧本机权限：
+# ProtectSystem=strict
+# ReadWritePaths=/var/lib/runabout /tmp
 NoNewPrivileges=true
 PrivateTmp=false
 ProtectKernelTunables=true

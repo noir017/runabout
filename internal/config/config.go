@@ -95,6 +95,13 @@ type FleetherdTaskExtCfg struct {
 
 // Fleet 是可选的机群配置。不写 hosts 时保持单机模式：工具里不出现 target 参数。
 type Fleet struct {
+	// ExposeLocal 控制是否把 runabout 所在的本机（local）作为可操作目标暴露给工具。
+	// 留空默认 true（兼容单机模式与旧配置）；设为 false 时要求至少配置一台远端主机，
+	// local 不会出现在 target 枚举与 servers 列表中，纯远端网关模式也不依赖本机 bash。
+	ExposeLocal *bool `yaml:"expose_local,omitempty"`
+	// DefaultTarget 指定省略 target 参数时的默认目标机器。
+	// 留空时：ExposeLocal 为 true 则默认 local；ExposeLocal 为 false 则 target 为必填参数。
+	DefaultTarget string `yaml:"default_target,omitempty"`
 	// SSHCommand 是远端调用的前缀，后面依次追加 <主机> <命令>。
 	SSHCommand []string `yaml:"ssh_command"`
 	// ProbeTimeout 是 servers 总览里单台机器的探测超时。
@@ -103,6 +110,14 @@ type Fleet struct {
 	// 退出码 0 表示已授权。它只查询本地状态，不发起申请。
 	ApprovalCheck string      `yaml:"approval_check"`
 	Hosts         []FleetHost `yaml:"hosts"`
+}
+
+// LocalExposed 报告是否暴露本机（local）作为可操作目标。未配置时默认 true。
+func (f Fleet) LocalExposed() bool {
+	if f.ExposeLocal == nil {
+		return true
+	}
+	return *f.ExposeLocal
 }
 
 // FleetHost 是一台远端机器。
@@ -505,7 +520,14 @@ func (c *Config) normalizeFleet() error {
 	if f.ProbeTimeout <= 0 {
 		f.ProbeTimeout = 10 * time.Second
 	}
+	if !f.LocalExposed() && len(f.Hosts) == 0 {
+		return fmt.Errorf("fleet.expose_local 为 false 时必须至少配置一台 fleet.hosts")
+	}
 	seen := map[string]bool{"local": true}
+	validTargets := map[string]bool{}
+	if f.LocalExposed() {
+		validTargets["local"] = true
+	}
 	for i := range f.Hosts {
 		h := &f.Hosts[i]
 		h.Name = strings.TrimSpace(h.Name)
@@ -519,6 +541,7 @@ func (c *Config) normalizeFleet() error {
 			return fmt.Errorf("fleet.hosts 里的机器名 %q 重复", h.Name)
 		}
 		seen[h.Name] = true
+		validTargets[h.Name] = true
 		h.Workdir = strings.TrimSpace(h.Workdir)
 		if h.Workdir != "" && !validRemoteWorkdir(h.Workdir) {
 			return fmt.Errorf("fleet.hosts[%d].workdir 必须是绝对路径、~ 或 ~/...，当前为 %q", i, h.Workdir)
@@ -533,12 +556,24 @@ func (c *Config) normalizeFleet() error {
 			c.Policy.TargetDenyPaths[h.Name] = append(c.Policy.TargetDenyPaths[h.Name], h.DenyPaths...)
 		}
 	}
+	f.DefaultTarget = strings.TrimSpace(f.DefaultTarget)
+	if f.DefaultTarget != "" {
+		if f.DefaultTarget == "local" && !f.LocalExposed() {
+			return fmt.Errorf("fleet.expose_local 为 false 时不能将 fleet.default_target 设为 %q", f.DefaultTarget)
+		}
+		if !validTargets[f.DefaultTarget] {
+			return fmt.Errorf("fleet.default_target %q 不在可用目标列表中", f.DefaultTarget)
+		}
+	}
 	return nil
 }
 
 // normalizeAuthPolicies 清理并校验静态令牌与 OAuth 客户端的 allowed_targets 白名单。
 func (c *Config) normalizeAuthPolicies() error {
-	known := map[string]bool{"local": true}
+	known := map[string]bool{}
+	if c.Fleet.LocalExposed() {
+		known["local"] = true
+	}
 	for _, h := range c.Fleet.Hosts {
 		known[h.Name] = true
 	}

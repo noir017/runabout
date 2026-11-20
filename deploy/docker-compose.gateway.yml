@@ -1,0 +1,61 @@
+# runabout 极简网关容器部署（无 bash / 无 sudo / 无开发套件）。
+# 适用场景：fleet.expose_local: false，仅作为远端机群的 MCP 控制面网关。
+#
+#   cd deploy
+#   cp .env.example .env && $EDITOR .env
+#   cp ../configs/config.example.yaml config.yaml && $EDITOR config.yaml
+#   docker compose -f docker-compose.gateway.yml up -d --build
+
+name: runabout
+
+services:
+  mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: gateway
+      args:
+        VERSION: ${VERSION:-0.1.0}
+        AGENT_UID: ${AGENT_UID:-10001}
+        AGENT_GID: ${AGENT_GID:-10001}
+    image: runabout:${VERSION:-gateway}
+    container_name: runabout
+    hostname: mcp
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-8484}:8484"
+    environment:
+      RB_BASE_URL: ${RB_BASE_URL:?请在 deploy/.env 里填 RB_BASE_URL，例如 https://mcp.example.com}
+      RB_LOG_LEVEL: ${RB_LOG_LEVEL:-info}
+      RB_LOG_FORMAT: ${RB_LOG_FORMAT:-json}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./config.yaml:/etc/runabout/config.yaml:ro
+      - ./ssh:/home/agent/.ssh:ro
+      - mcp-data:/var/lib/runabout
+    networks:
+      - default
+      - ingress
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: ${MEM_LIMIT:-256m}
+    memswap_limit: ${MEM_LIMIT:-256m}
+    pids_limit: 512
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  mcp-data:
+
+networks:
+  default:
+    name: runabout-internal
+  ingress:
+    external: true
+    name: ${INGRESS_NETWORK:-cloudflared}

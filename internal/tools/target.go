@@ -72,15 +72,41 @@ func (d *Deps) targetPropFor(p mcp.Principal) map[string]any {
 	if !d.fleetEnabled() {
 		return nil
 	}
-	desc := "目标机器，默认 local；各机器用途与状态见 servers"
-	if !p.AllowsTarget(fleet.LocalTarget) {
-		desc = "目标机器；各机器用途与状态见 servers"
+	desc := "目标机器（必填）；各机器用途与状态见 servers"
+	if def := d.defaultTargetFor(p); def != "" {
+		desc = fmt.Sprintf("目标机器，默认 %s；各机器用途与状态见 servers", def)
 	}
 	return map[string]any{
 		"type":        "string",
 		"enum":        d.allowedTargetNames(p),
 		"description": desc,
 	}
+}
+
+// defaultTargetFor 返回指定身份省略 target 时生效的默认机器；为空表示必须显式指定。
+func (d *Deps) defaultTargetFor(p mcp.Principal) string {
+	def := d.fleetOrLocal().DefaultTarget()
+	if def == "" || !p.AllowsTarget(def) {
+		return ""
+	}
+	return def
+}
+
+// targetRequiredFor 报告指定身份调用带 target 的工具时是否必须显式传入 target。
+func (d *Deps) targetRequiredFor(p mcp.Principal) bool {
+	return d.fleetEnabled() && d.defaultTargetFor(p) == ""
+}
+
+// schemaWithTargetFor 组装带 target 的工具参数表；当没有可用默认目标时自动把 target 标为必填。
+func (d *Deps) schemaWithTargetFor(p mcp.Principal, props map[string]any, required ...string) map[string]any {
+	d.withTargetFor(p, props)
+	if d.targetRequiredFor(p) {
+		req := make([]string, 0, len(required)+1)
+		req = append(req, "target")
+		req = append(req, required...)
+		return schema(props, req...)
+	}
+	return schema(props, required...)
 }
 
 // serversTargetPropFor 生成 servers 工具专用的完整 target 参数，保留所有允许机器的用途说明。
@@ -129,7 +155,15 @@ func (d *Deps) resolveTarget(name string) (targetInfo, error) {
 func (d *Deps) resolveTargetFor(p mcp.Principal, name string) (targetInfo, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		name = fleet.LocalTarget
+		def := d.fleetOrLocal().DefaultTarget()
+		if def == "" {
+			allowed := d.allowedTargetNames(p)
+			if len(allowed) == 0 {
+				return targetInfo{}, fmt.Errorf("未指定 target（当前凭据未分配可用机器）")
+			}
+			return targetInfo{}, fmt.Errorf("未指定 target；可选：%s", strings.Join(allowed, "、"))
+		}
+		name = def
 	}
 	h, ok := d.fleetOrLocal().Lookup(name)
 	if !ok {

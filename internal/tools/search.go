@@ -62,7 +62,7 @@ func (t *searchTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 - 默认最多返回 %d 条，超出会提示收窄条件。
 - 默认跳过 .git、node_modules、vendor 等目录；hidden=true 时也搜隐藏文件。%s`,
 			engine, t.d.Cfg.Tools.Search.MaxResults, remoteDoc),
-		InputSchema: schema(t.d.withTargetFor(p, map[string]any{
+		InputSchema: t.d.schemaWithTargetFor(p, map[string]any{
 			"pattern":          strProp("正则表达式（或 literal=true 时的字面量）"),
 			"path":             strProp("搜索起点，目录或文件"),
 			"glob":             strProp("文件名过滤，如 *.go；! 开头表示排除"),
@@ -72,7 +72,7 @@ func (t *searchTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 			"files_only":       boolProp("只输出命中的文件路径"),
 			"max_results":      intProp("最多返回多少条", 1, 5000),
 			"hidden":           boolProp("包含隐藏文件与被忽略的目录"),
-		}), "pattern"),
+		}, "pattern"),
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    mcp.Ptr(true),
 			IdempotentHint:  mcp.Ptr(true),

@@ -50,14 +50,14 @@ func (t *globTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 - path 指定搜索起点，默认当前工作目录。
 - 默认最多返回 %d 条，跳过 .git、node_modules 等目录。
 - 找内容用 search，找文件名用 glob。%s`, t.d.Cfg.Tools.Search.MaxGlobResult, remoteDoc),
-		InputSchema: schema(t.d.withTargetFor(p, map[string]any{
+		InputSchema: t.d.schemaWithTargetFor(p, map[string]any{
 			"pattern":      strProp("文件名通配模式，如 **/*.go"),
 			"path":         strProp("搜索起点目录"),
 			"sort_by":      enumProp("排序方式，默认 mtime", "mtime", "path", "size"),
 			"max_results":  intProp("最多返回多少条", 1, 5000),
 			"hidden":       boolProp("包含隐藏文件与常被忽略的目录"),
 			"include_dirs": boolProp("结果中也包含目录"),
-		}), "pattern"),
+		}, "pattern"),
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    mcp.Ptr(true),
 			IdempotentHint:  mcp.Ptr(true),

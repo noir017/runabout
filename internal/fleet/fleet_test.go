@@ -275,3 +275,44 @@ func TestApprovalCheck(t *testing.T) {
 		t.Error("标记文件存在时应视为已授权")
 	}
 }
+
+func TestFleetExposeLocalFalse(t *testing.T) {
+	noLocal := false
+
+	t.Run("单远端机且无 default_target", func(t *testing.T) {
+		f := New(config.Fleet{
+			ExposeLocal: &noLocal,
+			Hosts:       []config.FleetHost{{Name: "web1"}},
+		}, "/bin/bash", nil)
+		if !f.Enabled() {
+			t.Fatal("只有一台远端机且关闭 local 时，Enabled 仍应为 true")
+		}
+		if f.ExposeLocal() {
+			t.Fatal("ExposeLocal 应为 false")
+		}
+		if f.DefaultTarget() != "" {
+			t.Fatalf("DefaultTarget 应为空，实际 %q", f.DefaultTarget())
+		}
+		if len(f.Hosts()) != 1 || f.Hosts()[0].Name != "web1" {
+			t.Fatalf("Hosts 不应包含 local: %+v", f.Hosts())
+		}
+		if _, ok := f.Lookup("local"); ok {
+			t.Error("关闭 local 后不应查到 local")
+		}
+		if _, ok := f.Lookup(""); ok {
+			t.Error("无 default_target 时空 target 不应命中")
+		}
+	})
+
+	t.Run("带 default_target 缺省命中远端", func(t *testing.T) {
+		f := New(config.Fleet{
+			ExposeLocal:   &noLocal,
+			DefaultTarget: "web1",
+			Hosts:         []config.FleetHost{{Name: "web1"}, {Name: "web2"}},
+		}, "/bin/bash", nil)
+		h, ok := f.Lookup("")
+		if !ok || h.Name != "web1" {
+			t.Fatalf("空 target 应命中默认远端 web1，得到 ok=%v host=%+v", ok, h)
+		}
+	})
+}

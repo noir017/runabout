@@ -79,6 +79,8 @@ func (e *ConnectError) Error() string { return e.Detail }
 type Fleet struct {
 	hosts         []Host
 	byName        map[string]Host
+	exposeLocal   bool
+	defaultTarget string
 	probeTimeout  time.Duration
 	approvalCheck string
 	local         *Local
@@ -87,8 +89,15 @@ type Fleet struct {
 
 // New 构造机群。cfg 为空时只有 local 一台，Enabled 返回 false。
 func New(cfg config.Fleet, shellPath string, shellEnv map[string]string) *Fleet {
+	exposeLocal := cfg.LocalExposed()
+	defaultTarget := strings.TrimSpace(cfg.DefaultTarget)
+	if defaultTarget == "" && exposeLocal {
+		defaultTarget = LocalTarget
+	}
 	f := &Fleet{
 		byName:        map[string]Host{},
+		exposeLocal:   exposeLocal,
+		defaultTarget: defaultTarget,
 		probeTimeout:  cfg.ProbeTimeout,
 		approvalCheck: cfg.ApprovalCheck,
 		local:         NewLocal(shellPath, shellEnv),
@@ -97,9 +106,11 @@ func New(cfg config.Fleet, shellPath string, shellEnv map[string]string) *Fleet 
 	if f.probeTimeout <= 0 {
 		f.probeTimeout = 10 * time.Second
 	}
-	local := Host{Name: LocalTarget, Desc: "runabout 所在的容器", Local: true}
-	f.hosts = append(f.hosts, local)
-	f.byName[local.Name] = local
+	if exposeLocal {
+		local := Host{Name: LocalTarget, Desc: "runabout 所在的容器", Local: true}
+		f.hosts = append(f.hosts, local)
+		f.byName[local.Name] = local
+	}
 	for _, h := range cfg.Hosts {
 		host := Host{Name: h.Name, Desc: h.Desc, SSH: h.SSH, Workdir: h.Workdir, Approval: h.Approval}
 		if host.SSH == "" {
@@ -112,16 +123,32 @@ func New(cfg config.Fleet, shellPath string, shellEnv map[string]string) *Fleet 
 }
 
 // Enabled 报告是否配置了远端机器。
-func (f *Fleet) Enabled() bool { return len(f.hosts) > 1 }
+func (f *Fleet) Enabled() bool {
+	for _, h := range f.hosts {
+		if !h.Local {
+			return true
+		}
+	}
+	return false
+}
 
-// Hosts 返回全部机器，本机在第一位。
+// ExposeLocal 报告是否暴露本机（local）作为可操作目标。
+func (f *Fleet) ExposeLocal() bool { return f.exposeLocal }
+
+// DefaultTarget 返回省略 target 时的默认目标名；为空表示必须显式指定。
+func (f *Fleet) DefaultTarget() string { return f.defaultTarget }
+
+// Hosts 返回全部可用机器；若暴露本机，本机在第一位。
 func (f *Fleet) Hosts() []Host { return f.hosts }
 
-// Lookup 按名字找机器；空名字等同于 local。
+// Lookup 按名字找机器；空名字按 DefaultTarget 解析。
 func (f *Fleet) Lookup(name string) (Host, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		name = LocalTarget
+		if f.defaultTarget == "" {
+			return Host{}, false
+		}
+		name = f.defaultTarget
 	}
 	h, ok := f.byName[name]
 	return h, ok

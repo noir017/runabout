@@ -23,10 +23,52 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -o /out/runabout ./cmd/runabout \
     && /out/runabout version
 
-# ---------- 运行 ----------
-# 这个服务的价值就在于容器里工具齐全，所以刻意不用 scratch/alpine：
-# agent 需要 git、rg、jq、python、编译器这些才干得了活。
-FROM debian:bookworm-slim
+# ---------- 运行形态 A：极简网关（无 bash、无开发套件） ----------
+# 适合纯远端机群模式（fleet.expose_local: false）：只保留 runabout 静态二进制、
+# openssh-client、CA 证书与 tini，体积约 30MB，不带 bash / sudo / 编译器。
+# 构建：docker build -f deploy/Dockerfile --target gateway -t runabout:gateway .
+FROM alpine:3.21 AS gateway
+
+RUN apk add --no-cache \
+      ca-certificates \
+      openssh-client \
+      tini \
+      tzdata
+
+COPY --from=build /out/runabout /usr/local/bin/runabout
+COPY LICENSE NOTICE /usr/share/doc/runabout/
+
+ARG AGENT_UID=10001
+ARG AGENT_GID=10001
+RUN addgroup -g "${AGENT_GID}" agent \
+    && adduser -D -h /home/agent -s /bin/sh -u "${AGENT_UID}" -G agent agent \
+    && mkdir -p /var/lib/runabout /home/agent/.ssh \
+    && chown -R agent:agent /var/lib/runabout /home/agent/.ssh \
+    && chmod 0700 /home/agent/.ssh
+
+USER agent
+WORKDIR /home/agent
+
+ENV RB_LISTEN=0.0.0.0:8484 \
+    RB_DATA_DIR=/var/lib/runabout \
+    LANG=C.UTF-8
+
+EXPOSE 8484
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8484/healthz >/dev/null || exit 1
+
+LABEL org.opencontainers.image.title="runabout-gateway" \
+      org.opencontainers.image.description="Minimal MCP fleet gateway without local bash/dev toolchain" \
+      org.opencontainers.image.source="https://github.com/noir017/runabout" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/runabout"]
+CMD ["serve", "-c", "/etc/runabout/config.yaml"]
+
+# ---------- 运行形态 B：完整版（默认目标，兼容单机模式与本地子进程上游） ----------
+# 这个形态保留容器内开发工具链（git、rg、jq、python、nodejs、编译器等），
+# 适合单机模式或在容器内运行 stdio 上游子进程。
+FROM debian:bookworm-slim AS full
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
