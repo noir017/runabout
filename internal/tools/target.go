@@ -92,6 +92,25 @@ func (d *Deps) defaultTargetFor(p mcp.Principal) string {
 	return def
 }
 
+// localUsableFor 报告指定身份能否把本机（local）当目标：本机已暴露且在该身份的白名单内。
+func (d *Deps) localUsableFor(p mcp.Principal) bool {
+	return d.fleetOrLocal().ExposeLocal() && p.AllowsTarget(fleet.LocalTarget)
+}
+
+// workdirDocFor 描述省略 workdir 时的默认工作目录，只提该身份实际能用到的那部分：
+// 本机是 tools.shell.default_workdir，远端是机器配置的 workdir（没配就是登录用户的家目录）。
+func (d *Deps) workdirDocFor(p mcp.Principal) string {
+	local := d.Cfg.Tools.Shell.DefaultWorkdir
+	if !d.fleetEnabled() {
+		return local
+	}
+	const remote = "远端为机器配置的 workdir（没配就是登录用户的家目录）"
+	if !d.localUsableFor(p) {
+		return remote
+	}
+	return "本机 " + local + "，" + remote
+}
+
 // targetRequiredFor 报告指定身份调用带 target 的工具时是否必须显式传入 target。
 func (d *Deps) targetRequiredFor(p mcp.Principal) bool {
 	return d.fleetEnabled() && d.defaultTargetFor(p) == ""

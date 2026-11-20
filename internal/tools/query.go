@@ -45,10 +45,10 @@ func (t *queryTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 - 排查问题、查看服务、日志、磁盘、网络、容器状态时优先用它。%s
 - 只接受明确只读的命令：ls、cat、head、tail、grep、rg、find、df、du、free、ps、uptime、ss、ip、journalctl、systemctl status、docker ps 等；支持管道。
 - 写重定向、命令替换、修改状态的命令一律拒绝；需要时改用 shell。
-- 默认工作目录 %s；默认超时 %s，输出超限会截断。`, targetDoc, cfg.DefaultWorkdir, cfg.DefaultTimeout),
+- 默认工作目录：%s；默认超时 %s，输出超限会截断。`, targetDoc, t.d.workdirDocFor(p), cfg.DefaultTimeout),
 		InputSchema: t.d.schemaWithTargetFor(p, map[string]any{
 			"command":    strProp("要执行的只读命令，支持管道"),
-			"workdir":    strProp("工作目录，默认 " + cfg.DefaultWorkdir),
+			"workdir":    strProp("工作目录，默认 " + t.d.workdirDocFor(p)),
 			"timeout_ms": intProp("超时毫秒数，默认 "+cfg.DefaultTimeout.String(), 100, int(cfg.MaxTimeout.Milliseconds())),
 		}, "command"),
 		Annotations: &mcp.ToolAnnotations{

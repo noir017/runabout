@@ -567,6 +567,33 @@ func TestFleetExposeLocalFalseTools(t *testing.T) {
 	})
 }
 
+// 关闭 local 后，工具说明不能再把本机默认工作目录、本机搜索引擎当成默认行为讲给模型。
+func TestFleetExposeLocalFalseDocs(t *testing.T) {
+	noLocal := false
+	d, _ := newFleetDeps(t, config.Fleet{ExposeLocal: &noLocal, DefaultTarget: "web1"})
+	local := d.Cfg.Tools.Shell.DefaultWorkdir
+
+	for _, def := range []mcp.ToolDef{(&shellTool{d: d}).Definition(), (&queryTool{d: d}).Definition()} {
+		wd := def.InputSchema.(map[string]any)["properties"].(map[string]any)["workdir"].(map[string]any)["description"].(string)
+		for _, text := range []string{def.Description, wd} {
+			if strings.Contains(text, local) || !strings.Contains(text, "机器配置的 workdir") {
+				t.Errorf("%s 的默认工作目录应只讲远端 workdir，不提本机 %s: %s", def.Name, local, text)
+			}
+		}
+	}
+	if def := (&searchTool{d: d}).Definition(); strings.Contains(def.Description, "本机引擎") {
+		t.Errorf("关闭 local 后 search 不应再提本机引擎: %s", def.Description)
+	}
+
+	// 暴露 local 时两边都要讲到。
+	d2, _ := newFleetDeps(t, config.Fleet{})
+	local2 := d2.Cfg.Tools.Shell.DefaultWorkdir
+	wd := (&shellTool{d: d2}).Definition().InputSchema.(map[string]any)["properties"].(map[string]any)["workdir"].(map[string]any)["description"].(string)
+	if !strings.Contains(wd, "本机 "+local2) || !strings.Contains(wd, "机器配置的 workdir") {
+		t.Errorf("暴露 local 时 workdir 说明应同时讲本机与远端: %s", wd)
+	}
+}
+
 func TestAuditRecordsTarget(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Default()

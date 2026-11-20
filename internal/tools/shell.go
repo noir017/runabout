@@ -46,11 +46,12 @@ func (t *shellTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 			head = fmt.Sprintf("\ntarget 决定在哪台机器上执行，默认 %s。", def)
 		}
 		shellNote := "\n远端由目标机器的登录 shell 执行，命令要保持 POSIX sh 兼容。"
-		if t.d.fleetOrLocal().ExposeLocal() && p.AllowsTarget(fleet.LocalTarget) {
+		if t.d.localUsableFor(p) {
 			shellNote = "\n本机用 bash；远端由目标机器的登录 shell 执行，命令要保持 POSIX sh 兼容。"
 		}
-		targetDoc = head + shellNote + "\n远端默认工作目录是机器配置的 workdir，没配就是登录用户的家目录。"
+		targetDoc = head + shellNote
 	}
+	workdirDoc := t.d.workdirDocFor(p)
 	return mcp.ToolDef{
 		Name:  "shell",
 		Title: "执行 shell 命令",
@@ -61,7 +62,7 @@ func (t *shellTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 
 用法要点：
 - 支持管道、重定向、&&、for 循环等完整 bash 语法，命令在 %s -c 里执行。
-- 默认工作目录是 %s，可用 workdir 指定；相对路径都相对于它。
+- 默认工作目录：%s；可用 workdir 指定，相对路径都相对于它。
 - 默认超时 %s，最长 %s；超时会连同子进程一起杀掉。
 - 长任务（编译、备份、压测）请设 run_in_background=true，然后用 shell_output 拉输出、shell_kill 结束。
 - stdin 为空时命令的标准输入是 /dev/null，交互式命令会直接失败而不是卡住；需要喂输入就填 stdin。
@@ -73,10 +74,10 @@ func (t *shellTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 - 需要确认：rm -rf *、清空防火墙、重启机器、curl | bash、读取私钥等。这时会返回一个
   confirm_token，确认这确实是你要做的事之后，带着同一条命令和该 token 再调用一次即可执行。
   token 一次性、限时，且只对签发它的那条命令和目标机器有效。`,
-			targetDoc, cfg.Path, cfg.DefaultWorkdir, cfg.DefaultTimeout, cfg.MaxTimeout, cfg.MaxOutputBytes),
+			targetDoc, cfg.Path, workdirDoc, cfg.DefaultTimeout, cfg.MaxTimeout, cfg.MaxOutputBytes),
 		InputSchema: t.d.schemaWithTargetFor(p, map[string]any{
 			"command":           strProp("要执行的 bash 命令"),
-			"workdir":           strProp("工作目录，默认 " + cfg.DefaultWorkdir),
+			"workdir":           strProp("工作目录，默认 " + workdirDoc),
 			"timeout_ms":        intProp("超时毫秒数，默认 "+cfg.DefaultTimeout.String(), 100, int(cfg.MaxTimeout.Milliseconds())),
 			"stdin":             strProp("写入命令标准输入的内容"),
 			"env":               map[string]any{"type": "object", "description": "追加的环境变量；远端机器上会 export 后执行", "additionalProperties": map[string]any{"type": "string"}},

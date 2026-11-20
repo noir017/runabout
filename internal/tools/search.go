@@ -41,9 +41,12 @@ func (t *searchTool) Definition() mcp.ToolDef {
 }
 
 func (t *searchTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
-	engine := "内置 Go 实现"
-	if t.ripgrep() != "" {
-		engine = "ripgrep（尊重 .gitignore）"
+	engineDoc := "" // 纯远端时本机不可用，不提本机引擎
+	if t.d.localUsableFor(p) {
+		engineDoc = "（本机引擎：内置 Go 实现）"
+		if t.ripgrep() != "" {
+			engineDoc = "（本机引擎：ripgrep，尊重 .gitignore）"
+		}
 	}
 	remoteDoc := ""
 	if t.d.fleetEnabled() {
@@ -52,7 +55,7 @@ func (t *searchTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 	return mcp.ToolDef{
 		Name:  "search",
 		Title: "按内容搜索",
-		Description: fmt.Sprintf(`在文件内容里搜索正则（本机引擎：%s），输出 路径:行号:内容。
+		Description: fmt.Sprintf(`在文件内容里搜索正则%s，输出 路径:行号:内容。
 
 - pattern 默认按正则解释；要搜字面量（含 . ( ) 等符号）请设 literal=true。
 - path 可以是目录或单个文件，默认当前工作目录。
@@ -61,7 +64,7 @@ func (t *searchTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 - context_lines 输出命中行前后各 N 行上下文。
 - 默认最多返回 %d 条，超出会提示收窄条件。
 - 默认跳过 .git、node_modules、vendor 等目录；hidden=true 时也搜隐藏文件。%s`,
-			engine, t.d.Cfg.Tools.Search.MaxResults, remoteDoc),
+			engineDoc, t.d.Cfg.Tools.Search.MaxResults, remoteDoc),
 		InputSchema: t.d.schemaWithTargetFor(p, map[string]any{
 			"pattern":          strProp("正则表达式（或 literal=true 时的字面量）"),
 			"path":             strProp("搜索起点，目录或文件"),
