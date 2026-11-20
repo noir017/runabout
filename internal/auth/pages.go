@@ -85,7 +85,7 @@ func (s *Server) renderLoginWithStatus(w http.ResponseWriter, v loginView, statu
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https:")
 	w.WriteHeader(status)
 	if err := loginTmpl.Execute(w, v); err != nil {
 		s.log.Error("渲染登录页失败", "err", err)

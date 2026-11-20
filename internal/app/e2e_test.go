@@ -132,6 +132,9 @@ func (h *harness) authorize() {
 	if resp.StatusCode != http.StatusOK {
 		h.t.Fatalf("授权页状态 %d: %s", resp.StatusCode, page)
 	}
+	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "form-action 'self' https:") {
+		h.t.Errorf("登录页 CSP form-action 应允许 https 回调，实际: %q", csp)
+	}
 	m := regexp.MustCompile(`name="req_id" value="([^"]+)"`).FindStringSubmatch(page)
 	if m == nil {
 		h.t.Fatalf("登录页里找不到 req_id:\n%s", page)
