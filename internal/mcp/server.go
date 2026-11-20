@@ -87,8 +87,9 @@ func (nopAuditor) ToolCall(Principal, string, string, json.RawMessage, bool, str
 
 // Server 持有工具注册表并负责 JSON-RPC 方法分发。
 type Server struct {
-	info         Implementation
-	instructions string
+	info Implementation
+	// instructions 每次 initialize 时调用，便于把运行期才拿到说明的上游算进去。
+	instructions func() string
 	log          *slog.Logger
 	auditor      Auditor
 
@@ -96,7 +97,7 @@ type Server struct {
 	tools map[string]Handler
 }
 
-func NewServer(info Implementation, instructions string, log *slog.Logger) *Server {
+func NewServer(info Implementation, instructions func() string, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -208,6 +209,10 @@ func (s *Server) handleInitialize(raw json.RawMessage) (any, *RPCError) {
 	version := negotiate(p.ProtocolVersion)
 	s.log.Info("MCP 初始化", "client", p.ClientInfo.Name, "client_version", p.ClientInfo.Version,
 		"requested", p.ProtocolVersion, "negotiated", version)
+	instructions := ""
+	if s.instructions != nil {
+		instructions = s.instructions()
+	}
 	return InitializeResult{
 		ProtocolVersion: version,
 		Capabilities: ServerCapabilities{
@@ -215,7 +220,7 @@ func (s *Server) handleInitialize(raw json.RawMessage) (any, *RPCError) {
 			Logging: &struct{}{},
 		},
 		ServerInfo:   s.info,
-		Instructions: s.instructions,
+		Instructions: instructions,
 	}, nil
 }
 

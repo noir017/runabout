@@ -53,11 +53,11 @@ func (t *fleetherdTaskTool) Definition() mcp.ToolDef {
 		Title: "调度 fleetherd 子任务",
 		Description: `受控转发 fleetherd 的 task-* 子代理调度命令（严格白名单，argv 安全传参，避免 shell 转义问题）。
 
-- action 白名单：agents | new | send | read | list | status。
+- action 白名单：agents | new | send | read | list | status | stop。
 - 带 session_ref（fleetherd 托管会话）：自动从受保护的 web-bridge 映射中加载上下文并挂载到当前父话题。
 - 无 session_ref（手聊模式）：action=new 未传 parent_topic 时会尝试创建空白顶层协调话题；同批子任务请复用返回的 parent_topic。`,
 		InputSchema: schema(map[string]any{
-			"action":       enumProp("子任务操作：agents | new | send | read | list | status", "agents", "new", "send", "read", "list", "status"),
+			"action":       enumProp("子任务操作：agents | new | send | read | list | status | stop", "agents", "new", "send", "read", "list", "status", "stop"),
 			"session_ref":  strProp("可选；fleetherd 托管会话的 8-32 位短 ID"),
 			"parent_topic": strProp("可选；无 session_ref 手聊模式下复用的空白顶层协调话题 ID"),
 			"agent":        strProp("可选；action=new 指定执行子任务的 agent ID"),
@@ -65,7 +65,7 @@ func (t *fleetherdTaskTool) Definition() mcp.ToolDef {
 			"title":        strProp("可选；action=new 指定子任务标题"),
 			"model":        strProp("可选；action=new 指定子任务模型"),
 			"prompt":       strProp("任务提示词（action=new / send 时必填）"),
-			"topic":        strProp("子任务话题 ID（action=send / read / status 时必填）"),
+			"topic":        strProp("子任务话题 ID（action=send / read / status / stop 时必填）"),
 			"interrupt":    boolProp("可选；action=send 时先中断当前 turn 再发送"),
 			"forward":      boolProp("可选；action=send 时启用 forward 模式"),
 			"turn":         strProp("可选；action=read 指定轮次（如 last、done 或轮次号）"),
@@ -88,9 +88,9 @@ func (t *fleetherdTaskTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp
 	cfg := t.d.Cfg.Extensions.FleetherdTask
 	action := strings.TrimSpace(a.Action)
 	switch action {
-	case "agents", "new", "send", "read", "list", "status":
+	case "agents", "new", "send", "read", "list", "status", "stop":
 	default:
-		return mcp.ToolError("不支持的 action %q；仅允许 agents、new、send、read、list、status", a.Action), nil
+		return mcp.ToolError("不支持的 action %q；仅允许 agents、new、send、read、list、status、stop", a.Action), nil
 	}
 
 	// 先做目标机器白名单校验。
@@ -361,6 +361,16 @@ func buildFleetherdTaskArgv(binary, action string, a fleetherdTaskArgs, sessionR
 			return nil, fmt.Errorf("非法的 topic %q", a.Topic)
 		}
 		argv := addParentChannel([]string{binary, "task-status"})
+		return append(argv, "--", topic), nil
+	case "stop":
+		topic := strings.TrimSpace(a.Topic)
+		if topic == "" {
+			return nil, fmt.Errorf("action=stop 时 topic 不能为空")
+		}
+		if !validTopicIDRE.MatchString(topic) || strings.Contains(topic, "..") {
+			return nil, fmt.Errorf("非法的 topic %q", a.Topic)
+		}
+		argv := addParentChannel([]string{binary, "task-stop"})
 		return append(argv, "--", topic), nil
 	default:
 		return nil, fmt.Errorf("不支持的 action %q", action)

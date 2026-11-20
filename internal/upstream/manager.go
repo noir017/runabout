@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/noir017/runabout/internal/config"
 	"github.com/noir017/runabout/internal/mcp"
@@ -18,6 +20,8 @@ const (
 	retryBaseDelay = 5 * time.Second
 	// retryMaxDelay 是退避的上限。
 	retryMaxDelay = time.Minute
+	// maxInstructionsPerUpstream 限制单个上游追加到说明里的文本长度。
+	maxInstructionsPerUpstream = 8 << 10
 )
 
 // Manager 持有所有上游连接与最近一次拉取到的工具定义。
@@ -39,7 +43,7 @@ type Manager struct {
 
 type endpoint struct {
 	cfg    config.Upstream
-	client *Client
+	client client
 	// allowed 是白名单集合，转发前再复查一次，避免绕过工具注册直接调用。
 	allowed map[string]bool
 
@@ -67,7 +71,7 @@ func New(cfgs []config.Upstream, log *slog.Logger) *Manager {
 		}
 		ep := &endpoint{
 			cfg:     cfg,
-			client:  NewClient(cfg),
+			client:  newClient(cfg, log),
 			allowed: make(map[string]bool, len(cfg.Tools)),
 			defs:    map[string]mcp.ToolDef{},
 			warned:  map[string]bool{},
@@ -79,6 +83,14 @@ func New(cfgs []config.Upstream, log *slog.Logger) *Manager {
 		m.order = append(m.order, ep)
 	}
 	return m
+}
+
+// newClient 按配置选择传输方式：有 command 走 stdio 子进程，否则走 HTTP。
+func newClient(cfg config.Upstream, log *slog.Logger) client {
+	if len(cfg.Command) > 0 {
+		return newStdioClient(cfg, log)
+	}
+	return NewClient(cfg)
 }
 
 // Start 启动后台刷新：每个上游立即拉一次，之后按 refresh_interval 周期刷新。
@@ -97,10 +109,13 @@ func (m *Manager) Start() {
 	})
 }
 
-// Close 停止后台刷新并等待在途请求退出。
+// Close 停止后台刷新，等待在途请求退出，并释放上游连接（stdio 子进程在这里关停）。
 func (m *Manager) Close() {
 	m.cancel()
 	m.wg.Wait()
+	for _, ep := range m.order {
+		ep.client.Close()
+	}
 }
 
 func (m *Manager) loop(ctx context.Context, ep *endpoint) {
@@ -278,6 +293,44 @@ func (m *Manager) Call(ctx context.Context, upstreamName, tool string, args json
 	res.Content = parsed.Content
 	res.IsError = parsed.IsError
 	return res, nil
+}
+
+// Instructions 汇总开启了 instructions 且已握手成功的上游说明。
+// 每段带段头，写明上游名与工具名前缀；还没连上的上游直接跳过。
+func (m *Manager) Instructions() string {
+	var b strings.Builder
+	for _, ep := range m.order {
+		if !ep.cfg.Instructions {
+			continue
+		}
+		text := strings.TrimSpace(ep.client.Instructions())
+		if text == "" {
+			continue
+		}
+		if len(text) > maxInstructionsPerUpstream {
+			text = truncateUTF8(text, maxInstructionsPerUpstream) + "…"
+			m.log.Warn("上游 instructions 超过长度上限，已截断",
+				"upstream", ep.cfg.Name, "limit", maxInstructionsPerUpstream)
+		}
+		b.WriteString("\n\n## 上游 ")
+		b.WriteString(ep.cfg.Name)
+		b.WriteString(" 的说明（工具名前缀 ")
+		b.WriteString(ep.cfg.Prefix)
+		b.WriteString("_）\n\n")
+		b.WriteString(text)
+	}
+	return b.String()
+}
+
+// truncateUTF8 按字节截断但保证不切开一个 UTF-8 字符。
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func (ep *endpoint) buildDef(t Tool) mcp.ToolDef {

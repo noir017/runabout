@@ -106,7 +106,10 @@ func Build(cfg *config.Config, log *slog.Logger) (*Built, error) {
 
 	mcpSrv := mcp.NewServer(mcp.Implementation{
 		Name: "runabout", Title: "服务器基础工具集", Version: Version,
-	}, serverInstructions(len(cfg.Fleet.Hosts) > 0), log)
+	}, func() string {
+		// 每次 initialize 现算：上游可能刚连上，说明要跟着变。
+		return serverInstructions(len(cfg.Fleet.Hosts) > 0) + upMgr.Instructions()
+	}, log)
 	mcpSrv.SetAuditor(aud)
 	mcpSrv.Register(tools.All(deps)...)
 	// 工具集合已注册；后台立即拉取上游定义并按周期刷新。

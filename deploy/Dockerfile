@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ripgrep fd-find jq less tree file procps psmisc lsof \
       bash coreutils findutils diffutils patch tar gzip zip unzip xz-utils \
       python3 python3-pip python3-venv \
+      nodejs \
       build-essential pkg-config \
       sqlite3 rsync netcat-openbsd dnsutils iputils-ping vim-tiny \
       sudo tini \

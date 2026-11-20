@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/noir017/runabout/internal/config"
 )
@@ -24,6 +25,7 @@ type fakeUpstream struct {
 	requireToken    string
 	sse             bool
 	protocol        string
+	instructions    string
 	notifyStatus    int
 	badResult       bool
 	paginateForever bool
@@ -105,6 +107,7 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if proto == "" {
 			proto = "2025-06-18"
 		}
+		instructions := f.instructions
 		f.mu.Unlock()
 		if sid != "" {
 			w.Header().Set("Mcp-Session-Id", sid)
@@ -113,6 +116,7 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"protocolVersion": proto,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "fake", "version": "1"},
+			"instructions":    instructions,
 		})
 	case "notifications/initialized":
 		f.mu.Lock()
@@ -333,6 +337,26 @@ func TestClientListAndCall(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0].Session != "sess-1" {
 		t.Errorf("调用没有带上会话 id: %+v", calls)
+	}
+}
+
+// TestClientStoresInstructions 验证 initialize 里的 instructions 被保存下来。
+func TestClientStoresInstructions(t *testing.T) {
+	fake := newFake()
+	fake.instructions = "先调用 list_items"
+	fake.tools = []Tool{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	c := NewClient(testConfig(srv.URL))
+	if got := c.Instructions(); got != "" {
+		t.Errorf("握手前说明应为空，实际 %q", got)
+	}
+	if _, err := c.ListTools(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Instructions(); got != "先调用 list_items" {
+		t.Errorf("说明应来自上游 initialize，实际 %q", got)
 	}
 }
 
@@ -1027,4 +1051,80 @@ func TestManagerStartAndClose(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("后台刷新没有在启动后拉到工具定义")
+}
+
+// TestManagerInstructions 验证开启 instructions 的上游在握手后追加说明段落，
+// 段头带上游名与工具前缀；未开启或还没连上的上游不出现。
+func TestManagerInstructions(t *testing.T) {
+	fake := newFake()
+	fake.instructions = "上游使用说明"
+	fake.tools = []Tool{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	cfg := testConfig(srv.URL)
+	cfg.Instructions = true
+	var logs bytes.Buffer
+	m := New([]config.Upstream{cfg}, slog.New(slog.NewTextHandler(&logs, nil)))
+	defer m.Close()
+
+	if got := m.Instructions(); got != "" {
+		t.Errorf("上游还没连上时应跳过，实际 %q", got)
+	}
+	if err := m.RefreshAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := m.Instructions()
+	for _, want := range []string{
+		"## 上游 fake 的说明（工具名前缀 fk_）",
+		"上游使用说明",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("说明应包含 %q，实际:\n%s", want, got)
+		}
+	}
+
+	// 关闭开关后不再追加。
+	cfg.Instructions = false
+	m2 := New([]config.Upstream{cfg}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer m2.Close()
+	if err := m2.RefreshAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := m2.Instructions(); got != "" {
+		t.Errorf("instructions 关闭时不应追加，实际 %q", got)
+	}
+}
+
+// TestManagerInstructionsTruncated 验证单段说明超过上限时截断并记日志，
+// 且截断不破坏 UTF-8。
+func TestManagerInstructionsTruncated(t *testing.T) {
+	fake := newFake()
+	fake.instructions = strings.Repeat("长", maxInstructionsPerUpstream)
+	fake.tools = []Tool{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	cfg := testConfig(srv.URL)
+	cfg.Instructions = true
+	var logs bytes.Buffer
+	m := New([]config.Upstream{cfg}, slog.New(slog.NewTextHandler(&logs, nil)))
+	defer m.Close()
+	if err := m.RefreshAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	got := m.Instructions()
+	if !strings.Contains(got, "…") {
+		t.Error("超长说明应带截断标记")
+	}
+	if !utf8.ValidString(got) {
+		t.Error("截断后的说明必须是合法 UTF-8")
+	}
+	if len(got) > maxInstructionsPerUpstream+200 {
+		t.Errorf("截断后仍过长: %d 字节", len(got))
+	}
+	if !strings.Contains(logs.String(), "已截断") {
+		t.Errorf("截断应记日志:\n%s", logs.String())
+	}
 }

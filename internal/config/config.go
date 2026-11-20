@@ -33,16 +33,25 @@ type Config struct {
 	Upstreams []Upstream `yaml:"upstreams,omitempty"`
 }
 
-// Upstream 是一个上游 MCP 服务（Streamable HTTP）。启用后，白名单里的工具
-// 以 <prefix>_<工具名> 出现在 tools/list，调用原样转发给上游。
+// Upstream 是一个上游 MCP 服务（Streamable HTTP 或 stdio 子进程）。启用后，
+// 白名单里的工具以 <prefix>_<工具名> 出现在 tools/list，调用原样转发给上游。
 // runabout 不关心上游是什么，也不解析它的业务语义。
 type Upstream struct {
 	// Name 用于日志与错误信息，必须在 upstreams 里唯一。
 	Name string `yaml:"name"`
 	// URL 是上游的 MCP Streamable HTTP 端点（http 或 https）。
-	URL string `yaml:"url"`
+	// 与 Command 二选一。
+	URL string `yaml:"url,omitempty"`
+	// Command 是 stdio 上游的启动 argv，如 ["node", "/opt/example/server.mjs"]。
+	// 与 URL 二选一。
+	Command []string `yaml:"command,omitempty"`
+	// Env 是额外注入给 stdio 子进程的环境变量（字面值）。
+	// 子进程只继承 PATH、HOME、LANG，不继承 runabout 的其他环境变量。
+	Env map[string]string `yaml:"env,omitempty"`
+	// Workdir 是 stdio 子进程的工作目录，必须是绝对路径。
+	Workdir string `yaml:"workdir,omitempty"`
 	// TokenEnv 是存放 Bearer 令牌的环境变量名；留空表示不带鉴权。
-	// 配置文件里永远不写明文令牌。
+	// 只用于 HTTP 上游；配置文件里永远不写明文令牌。
 	TokenEnv string `yaml:"token_env,omitempty"`
 	// Prefix 是暴露给客户端的工具名前缀，最终名字为 <prefix>_<工具名>。
 	Prefix string `yaml:"prefix"`
@@ -52,6 +61,9 @@ type Upstream struct {
 	RefreshInterval time.Duration `yaml:"refresh_interval,omitempty"`
 	// Timeout 是单次上游请求（含 tools/call）的超时，默认 60s。
 	Timeout time.Duration `yaml:"timeout,omitempty"`
+	// Instructions 为 true 时，把上游 initialize 返回的 instructions
+	// 追加到 runabout 回复客户端的说明里。默认 false。
+	Instructions bool `yaml:"instructions,omitempty"`
 }
 
 // Extensions 控制可选扩展工具。所有扩展默认关闭，不改变默认工具列表。
@@ -667,16 +679,47 @@ func (c *Config) normalizeUpstreams() error {
 		seenName[u.Name] = true
 
 		u.URL = strings.TrimSpace(u.URL)
-		parsed, err := url.Parse(u.URL)
-		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return fmt.Errorf("upstreams[%d].url 必须是 http(s) 绝对地址，当前为 %q", i, redactURL(u.URL))
+		u.Workdir = strings.TrimSpace(u.Workdir)
+		switch {
+		case u.URL != "" && len(u.Command) > 0:
+			return fmt.Errorf("upstreams[%d] 的 url 与 command 只能二选一", i)
+		case u.URL == "" && len(u.Command) == 0:
+			return fmt.Errorf("upstreams[%d] 必须配置 url（HTTP 上游）或 command（stdio 上游）", i)
 		}
-		if parsed.User != nil {
-			return fmt.Errorf("upstreams[%d].url 里不要写凭据，令牌请用 token_env", i)
-		}
-		// query 与 fragment 不参与 MCP 端点定位，且容易夹带凭据，直接拒绝。
-		if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" {
-			return fmt.Errorf("upstreams[%d].url 不能带 query 或 fragment，当前为 %q", i, redactURL(u.URL))
+		if len(u.Command) > 0 {
+			u.Command[0] = strings.TrimSpace(u.Command[0])
+			if u.Command[0] == "" {
+				return fmt.Errorf("upstreams[%d].command 的第一项不能为空", i)
+			}
+			if strings.TrimSpace(u.TokenEnv) != "" {
+				return fmt.Errorf("upstreams[%d].token_env 只用于 HTTP 上游，stdio 上游请用 env 传凭据", i)
+			}
+			if u.Workdir != "" && !filepath.IsAbs(u.Workdir) {
+				return fmt.Errorf("upstreams[%d].workdir 必须是绝对路径，当前为 %q", i, u.Workdir)
+			}
+			for k := range u.Env {
+				if !envNameRE.MatchString(k) {
+					return fmt.Errorf("upstreams[%d].env 里的变量名 %q 不合法", i, k)
+				}
+			}
+		} else {
+			parsed, err := url.Parse(u.URL)
+			if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+				return fmt.Errorf("upstreams[%d].url 必须是 http(s) 绝对地址，当前为 %q", i, redactURL(u.URL))
+			}
+			if parsed.User != nil {
+				return fmt.Errorf("upstreams[%d].url 里不要写凭据，令牌请用 token_env", i)
+			}
+			// query 与 fragment 不参与 MCP 端点定位，且容易夹带凭据，直接拒绝。
+			if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" {
+				return fmt.Errorf("upstreams[%d].url 不能带 query 或 fragment，当前为 %q", i, redactURL(u.URL))
+			}
+			if len(u.Env) > 0 {
+				return fmt.Errorf("upstreams[%d].env 只用于 stdio 上游（配置 command）", i)
+			}
+			if u.Workdir != "" {
+				return fmt.Errorf("upstreams[%d].workdir 只用于 stdio 上游（配置 command）", i)
+			}
 		}
 
 		u.Prefix = strings.TrimSpace(u.Prefix)
