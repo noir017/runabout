@@ -146,25 +146,73 @@ func TestUpstreamConfig(t *testing.T) {
 	}
 }
 
+func TestUpstreamStdioConfig(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x"}}
+	cfg.Upstreams = []Upstream{{
+		Name:    "node",
+		Command: []string{"node", "/opt/example/server.mjs"},
+		Env:     map[string]string{"EXAMPLE_TOKEN": "literal", "LANG": "C"},
+		Workdir: "/opt/example",
+		Prefix:  "nd",
+		Tools:   []string{"echo"},
+	}}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	u := cfg.Upstreams[0]
+	if u.URL != "" {
+		t.Errorf("stdio 上游不应有 url，实际 %q", u.URL)
+	}
+	if len(u.Command) != 2 || u.Command[1] != "/opt/example/server.mjs" {
+		t.Errorf("command 应原样保留，实际 %v", u.Command)
+	}
+	if u.RefreshInterval != 10*time.Minute || u.Timeout != 60*time.Second {
+		t.Errorf("默认值不对: refresh=%v timeout=%v", u.RefreshInterval, u.Timeout)
+	}
+}
+
 func TestUpstreamConfigRejectsInvalid(t *testing.T) {
 	valid := func() Upstream {
 		return Upstream{Name: "fd", URL: "http://127.0.0.1:9000/mcp", Prefix: "fd", Tools: []string{"topic_list"}}
 	}
 	cases := map[string]func(*Config){
-		"空名字":            func(c *Config) { c.Upstreams[0].Name = "" },
-		"名字含空格":          func(c *Config) { c.Upstreams[0].Name = "bad name" },
-		"重复名字":           func(c *Config) { c.Upstreams = append(c.Upstreams, valid()) },
-		"空 URL":          func(c *Config) { c.Upstreams[0].URL = "" },
-		"非 http":         func(c *Config) { c.Upstreams[0].URL = "ftp://example.com/mcp" },
-		"URL 带凭据":        func(c *Config) { c.Upstreams[0].URL = "http://user:pass@example.com/mcp" },
-		"URL 带 query":    func(c *Config) { c.Upstreams[0].URL = "http://example.com/mcp?token=x" },
-		"URL 带 fragment": func(c *Config) { c.Upstreams[0].URL = "http://example.com/mcp#frag" },
-		"空前缀":            func(c *Config) { c.Upstreams[0].Prefix = "" },
-		"非法前缀":           func(c *Config) { c.Upstreams[0].Prefix = "fd x" },
-		"空白名单":           func(c *Config) { c.Upstreams[0].Tools = nil },
-		"非法工具名":          func(c *Config) { c.Upstreams[0].Tools = []string{"bad tool"} },
-		"非法 token_env":   func(c *Config) { c.Upstreams[0].TokenEnv = "1BAD" },
-		"与内置工具重名":        func(c *Config) { c.Upstreams[0].Prefix = "shell"; c.Upstreams[0].Tools = []string{"output"} },
+		"空名字":                func(c *Config) { c.Upstreams[0].Name = "" },
+		"名字含空格":              func(c *Config) { c.Upstreams[0].Name = "bad name" },
+		"重复名字":               func(c *Config) { c.Upstreams = append(c.Upstreams, valid()) },
+		"空 URL":              func(c *Config) { c.Upstreams[0].URL = "" },
+		"非 http":             func(c *Config) { c.Upstreams[0].URL = "ftp://example.com/mcp" },
+		"URL 带凭据":            func(c *Config) { c.Upstreams[0].URL = "http://user:pass@example.com/mcp" },
+		"URL 带 query":        func(c *Config) { c.Upstreams[0].URL = "http://example.com/mcp?token=x" },
+		"URL 带 fragment":     func(c *Config) { c.Upstreams[0].URL = "http://example.com/mcp#frag" },
+		"空前缀":                func(c *Config) { c.Upstreams[0].Prefix = "" },
+		"非法前缀":               func(c *Config) { c.Upstreams[0].Prefix = "fd x" },
+		"空白名单":               func(c *Config) { c.Upstreams[0].Tools = nil },
+		"非法工具名":              func(c *Config) { c.Upstreams[0].Tools = []string{"bad tool"} },
+		"非法 token_env":       func(c *Config) { c.Upstreams[0].TokenEnv = "1BAD" },
+		"url 与 command 同时配置": func(c *Config) { c.Upstreams[0].Command = []string{"node"} },
+		"两者都没配置":             func(c *Config) { c.Upstreams[0].URL = "" },
+		"command 首项为空": func(c *Config) {
+			c.Upstreams[0].URL = ""
+			c.Upstreams[0].Command = []string{" "}
+		},
+		"stdio 带 token_env": func(c *Config) {
+			c.Upstreams[0].URL = ""
+			c.Upstreams[0].Command = []string{"node"}
+			c.Upstreams[0].TokenEnv = "EXAMPLE_TOKEN"
+		},
+		"stdio 相对 workdir": func(c *Config) {
+			c.Upstreams[0].URL = ""
+			c.Upstreams[0].Command = []string{"node"}
+			c.Upstreams[0].Workdir = "relative/dir"
+		},
+		"stdio 非法 env 名": func(c *Config) {
+			c.Upstreams[0].URL = ""
+			c.Upstreams[0].Command = []string{"node"}
+			c.Upstreams[0].Env = map[string]string{"1BAD": "x"}
+		},
+		"HTTP 带 env": func(c *Config) { c.Upstreams[0].Env = map[string]string{"A": "b"} },
+		"与内置工具重名":    func(c *Config) { c.Upstreams[0].Prefix = "shell"; c.Upstreams[0].Tools = []string{"output"} },
 		"跨上游重名": func(c *Config) {
 			second := valid()
 			second.Name = "other"

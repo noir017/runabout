@@ -39,7 +39,7 @@ type Manager struct {
 
 type endpoint struct {
 	cfg    config.Upstream
-	client *Client
+	client client
 	// allowed 是白名单集合，转发前再复查一次，避免绕过工具注册直接调用。
 	allowed map[string]bool
 
@@ -67,7 +67,7 @@ func New(cfgs []config.Upstream, log *slog.Logger) *Manager {
 		}
 		ep := &endpoint{
 			cfg:     cfg,
-			client:  NewClient(cfg),
+			client:  newClient(cfg, log),
 			allowed: make(map[string]bool, len(cfg.Tools)),
 			defs:    map[string]mcp.ToolDef{},
 			warned:  map[string]bool{},
@@ -79,6 +79,14 @@ func New(cfgs []config.Upstream, log *slog.Logger) *Manager {
 		m.order = append(m.order, ep)
 	}
 	return m
+}
+
+// newClient 按配置选择传输方式：有 command 走 stdio 子进程，否则走 HTTP。
+func newClient(cfg config.Upstream, log *slog.Logger) client {
+	if len(cfg.Command) > 0 {
+		return newStdioClient(cfg, log)
+	}
+	return NewClient(cfg)
 }
 
 // Start 启动后台刷新：每个上游立即拉一次，之后按 refresh_interval 周期刷新。
@@ -97,10 +105,13 @@ func (m *Manager) Start() {
 	})
 }
 
-// Close 停止后台刷新并等待在途请求退出。
+// Close 停止后台刷新，等待在途请求退出，并释放上游连接（stdio 子进程在这里关停）。
 func (m *Manager) Close() {
 	m.cancel()
 	m.wg.Wait()
+	for _, ep := range m.order {
+		ep.client.Close()
+	}
 }
 
 func (m *Manager) loop(ctx context.Context, ep *endpoint) {

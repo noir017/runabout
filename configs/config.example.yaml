@@ -251,6 +251,7 @@ extensions:
 
 # 可选：上游 MCP 透传（默认关闭）。配置后，白名单内的上游工具会以
 # <prefix>_<工具名> 出现在 tools/list，tools/call 原样转发给上游。
+# 每项在 url（HTTP）与 command（stdio）中二选一。
 # runabout 不关心上游是什么；上游不可达只让对应工具报错，不影响自身工具。
 upstreams: []
 #  - name: example                      # 唯一，用于日志与报错
@@ -260,3 +261,11 @@ upstreams: []
 #    tools: ["list_items", "read_item"]  # 必填白名单，白名单外的一律不暴露
 #    refresh_interval: 10m              # 工具列表刷新间隔，默认 10m
 #    timeout: 60s                       # 单次上游请求超时，默认 60s
+#
+#  - name: local                        # stdio 上游：启动时拉起子进程
+#    command: ["node", "/opt/example/server.mjs"]
+#    env:                               # 字面值；子进程只继承 PATH、HOME、LANG
+#      EXAMPLE_MODE: "readonly"
+#    workdir: "/opt/example"            # 必须是绝对路径
+#    prefix: "lo"
+#    tools: ["search"]

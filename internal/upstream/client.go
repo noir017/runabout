@@ -76,8 +76,20 @@ type rpcError struct {
 
 type rpcResponse struct {
 	ID     json.RawMessage `json:"id"`
+	Method string          `json:"method,omitempty"`
 	Result json.RawMessage `json:"result"`
 	Error  *rpcError       `json:"error"`
+}
+
+// client 是 Manager 使用的最小上游客户端接口。HTTP 与 stdio 各实现一份，
+// Manager 不关心底层传输方式。
+type client interface {
+	ListTools(ctx context.Context) (ToolList, error)
+	CallTool(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error)
+	// Instructions 返回上游 initialize 里带的说明；还没握手成功时为空。
+	Instructions() string
+	// Close 释放传输资源；对 HTTP 客户端是空操作。
+	Close()
 }
 
 // Client 是一个上游 MCP 端点的最小客户端：JSON-RPC over Streamable HTTP。
@@ -102,6 +114,9 @@ type Client struct {
 	sessionID string
 	proto     string
 	inited    bool
+	// instructions 是最近一次 initialize 返回的说明。单独用原子值保存，
+	// 避免握手期间取说明被 mu 阻塞。
+	instructions atomic.Value // string
 
 	nextID atomic.Int64
 }
@@ -126,6 +141,26 @@ func NewClient(cfg config.Upstream) *Client {
 // 每页响应体有单独上限，所有页的累计大小也有上限；工具数与分页数超过上限时报错。
 // 单个工具超过长度上限时只丢弃该工具：白名单内的记录到 Rejected，白名单外的静默丢弃。
 func (c *Client) ListTools(ctx context.Context) (ToolList, error) {
+	return listTools(ctx, c.allowed, c.listPageLimit, c.listTotalLimit,
+		func(ctx context.Context, params map[string]any, limit int64) (json.RawMessage, int64, error) {
+			rep, err := c.callRetry(ctx, "tools/list", params, limit, true)
+			return rep.raw, rep.size, err
+		})
+}
+
+// Instructions 返回上游 initialize 里带的说明。
+func (c *Client) Instructions() string {
+	s, _ := c.instructions.Load().(string)
+	return s
+}
+
+// Close 对 HTTP 客户端是空操作，保留接口一致性。
+func (c *Client) Close() {}
+
+// listTools 按 nextCursor 拉取分页工具列表。call 返回一页的原始 result 与字节数，
+// HTTP 与 stdio 客户端共用这套分页、体积与单工具上限逻辑。
+func listTools(ctx context.Context, allowed map[string]bool, pageLimit, totalLimit int64,
+	call func(context.Context, map[string]any, int64) (json.RawMessage, int64, error)) (ToolList, error) {
 	out := ToolList{Rejected: map[string]string{}}
 	cursor := ""
 	var total int64
@@ -137,25 +172,25 @@ func (c *Client) ListTools(ctx context.Context) (ToolList, error) {
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
-		rep, err := c.callRetry(ctx, "tools/list", params, c.listPageLimit, true)
+		raw, size, err := call(ctx, params, pageLimit)
 		if err != nil {
 			return ToolList{}, err
 		}
-		total += rep.size
-		if total > c.listTotalLimit {
-			return ToolList{}, fmt.Errorf("tools/list 响应累计超过 %d 字节上限", c.listTotalLimit)
+		total += size
+		if total > totalLimit {
+			return ToolList{}, fmt.Errorf("tools/list 响应累计超过 %d 字节上限", totalLimit)
 		}
 		var res struct {
 			Tools      []Tool `json:"tools"`
 			NextCursor string `json:"nextCursor"`
 		}
-		if err := json.Unmarshal(rep.raw, &res); err != nil {
+		if err := json.Unmarshal(raw, &res); err != nil {
 			return ToolList{}, fmt.Errorf("上游结果无法解析: %w", err)
 		}
 		for _, t := range res.Tools {
 			// 解码一页就立刻检查，避免把超限工具累积到内存里。
 			if reason := toolLimitReason(t); reason != "" {
-				if c.allowed[t.Name] {
+				if allowed[t.Name] {
 					out.Rejected[t.Name] = reason
 				}
 				continue
@@ -236,6 +271,7 @@ func (c *Client) initializeLocked(ctx context.Context) error {
 	}
 	var res struct {
 		ProtocolVersion string `json:"protocolVersion"`
+		Instructions    string `json:"instructions"`
 	}
 	if err := json.Unmarshal(rep.raw, &res); err != nil {
 		return fmt.Errorf("initialize 结果无法解析: %w", err)
@@ -254,6 +290,7 @@ func (c *Client) initializeLocked(ctx context.Context) error {
 	c.sessionID = sid
 	c.proto = proto
 	c.inited = true
+	c.instructions.Store(res.Instructions)
 	return nil
 }
 

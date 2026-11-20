@@ -108,13 +108,23 @@ upstreams:
     tools: ["list_items", "read_item"]  # 必填白名单
     refresh_interval: 10m              # 默认 10m
     timeout: 60s                       # 默认 60s
+
+  - name: local                        # stdio 上游
+    command: ["node", "/opt/example/server.mjs"]
+    env: {EXAMPLE_MODE: "readonly"}    # 字面值；继承哪些变量见下文
+    workdir: "/opt/example"
+    prefix: "lo"
+    tools: ["search"]
 ```
 
+- 每项必须在 `url` 与 `command` 中二选一；同时配置或都不配置都会在启动时被拒绝。
+- HTTP 上游走 Streamable HTTP；`token_env` 指向存放 Bearer 令牌的环境变量，令牌在每次请求时读取，配置文件里不写明文凭据。
+- stdio 上游在启动时拉起子进程，在一条 stdin/stdout 上使用按行分隔的 JSON-RPC；请求并发多路复用，按 id 匹配响应。子进程环境只有 `PATH`、`HOME`、`LANG` 加上 `env` 里的字面值，不继承 runabout 的其他环境变量；`workdir` 必须是绝对路径。stderr 按行写进 runabout 日志，过长的行会截断。
+- 子进程退出时，在飞请求立即失败；之后按既有的重试退避重启，重启后重新 initialize 再服务调用。关停时先关 stdin，最多等几秒让在飞请求处理完，超时再 kill 进程组。
 - 启动后在后台立即拉取工具列表，之后按 `refresh_interval` 定期刷新；描述、标题与 `inputSchema` 都来自上游。
 - 只暴露白名单内的工具。对外工具集合由配置固定，上游宕机时 `tools/list` 仍然稳定。
 - 工具定义有体积上限：`tools/list` 单页 4 MiB、所有分页累计 32 MiB；每个工具的 name、title、description 和 `inputSchema` 在解码时立即检查（128 B / 1 KiB / 64 KiB / 256 KiB）。白名单内的工具超限时只跳过本次刷新：沿用上一版定义（没有上一版则用占位定义），其余工具照常更新，每个坏工具只记一条 warn，不会让整次刷新失败。
 - `tools/call` 原样转发，上游结果原样返回，包括 runabout 不认识的内容块与字段。
-- 令牌在每次请求时从指定的环境变量读取，配置文件里不写明文凭据。
 - 上游不可达只让对应工具返回错误，不影响 runabout 自身的工具。
 - 透传调用和其他工具一样进审计日志，工具名为加了前缀后的名字。
 
@@ -136,6 +146,7 @@ runabout 的设计目标是运行在反向代理或 Tunnel 后面，而不是直
 
 - 所有透传工具共用 `token_env` 指定的一把上游令牌。runabout 不按调用方或工具拆分该令牌，上游工具也**不受** `auth.static_tokens[].allowed_targets` 与 `auth.client_policies` 约束。
 - 上游的 `annotations` 原样透传。runabout 不校验 `readOnlyHint`，也不对上游调用套用自己的 shell 与路径策略；真正的权限边界在上游。
+- stdio 上游以 runabout 的 OS 权限运行子进程。runabout 只收窄它的环境变量（`PATH`、`HOME`、`LANG` 加 `env`），并不构成沙箱。
 
 runabout 不依赖外部身份提供商。客户端注册（RFC 7591）、授权码 + PKCE、Token 签发和 Token 轮换均由本地服务处理。
 

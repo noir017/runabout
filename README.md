@@ -106,13 +106,23 @@ upstreams:
     tools: ["list_items", "read_item"]  # required whitelist
     refresh_interval: 10m              # default 10m
     timeout: 60s                       # default 60s
+
+  - name: local                        # stdio upstream
+    command: ["node", "/opt/example/server.mjs"]
+    env: {EXAMPLE_MODE: "readonly"}    # literal values; see below for inherited vars
+    workdir: "/opt/example"
+    prefix: "lo"
+    tools: ["search"]
 ```
 
+- Each entry sets exactly one of `url` and `command`. Setting both, or neither, is rejected at startup.
+- HTTP upstreams use Streamable HTTP; `token_env` names the environment variable holding the Bearer token. Tokens are read at request time; do not put credentials in the config file.
+- stdio upstreams are spawned at startup and speak newline-delimited JSON-RPC on one stdin/stdout. Requests are multiplexed concurrently and matched by id. The child environment contains only `PATH`, `HOME`, `LANG` plus the literal values in `env`; nothing else is inherited. `workdir` must be an absolute path. stderr is logged line by line, with long lines truncated.
+- If a stdio child exits, in-flight calls fail immediately. The child is restarted with the usual retry backoff and re-initialized before serving calls again. On shutdown runabout closes stdin, waits a few seconds for in-flight calls, then kills the process group.
 - The tool list is fetched in the background at startup and refreshed every `refresh_interval`. Descriptions, titles and `inputSchema` come from the upstream.
 - Only whitelisted tools are exposed. The exposed name set is fixed by config, so `tools/list` stays stable even while the upstream is down.
 - Tool definitions are size-bounded. A single `tools/list` page is capped at 4 MiB and all pages together at 32 MiB; each tool's name, title, description and `inputSchema` are checked as soon as the page is decoded (128 B / 1 KiB / 64 KiB / 256 KiB). A whitelisted tool that exceeds a limit is skipped for that refresh only: it keeps its previous definition (or a placeholder if there is none), other tools still update, and runabout logs one warning per tool instead of failing the whole refresh.
 - `tools/call` is forwarded verbatim, and the upstream result is returned unchanged, including content blocks and fields runabout does not model.
-- Tokens are read from the named environment variable at request time. Do not put credentials in the config file.
 - An unreachable upstream only makes its own tools return an error; runabout's built-in tools are unaffected.
 - Passthrough calls are audited like any other tool call, under the prefixed tool name.
 
@@ -134,6 +144,7 @@ Upstream passthrough adds two boundaries to be aware of:
 
 - All passthrough tools share the single upstream token named by `token_env`. runabout does not scope that token per caller or per tool, and upstream tools are **not** constrained by `auth.static_tokens[].allowed_targets` or `auth.client_policies`.
 - Upstream `annotations` are forwarded as-is. runabout does not verify `readOnlyHint`, and its shell and path policy does not apply to upstream calls; the upstream's own permissions are the boundary.
+- stdio upstreams run as child processes with runabout's OS privileges. runabout narrows their environment to `PATH`, `HOME`, `LANG` plus `env`, but it is not a sandbox.
 
 Do not treat runabout's policy as a replacement for Linux permissions. A process that can run unrestricted `sudo` can usually bypass application-level restrictions.
 
