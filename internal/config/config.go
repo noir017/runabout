@@ -61,6 +61,9 @@ type Upstream struct {
 	RefreshInterval time.Duration `yaml:"refresh_interval,omitempty"`
 	// Timeout 是单次上游请求（含 tools/call）的超时，默认 60s。
 	Timeout time.Duration `yaml:"timeout,omitempty"`
+	// Instructions 为 true 时，把上游 initialize 返回的 instructions
+	// 追加到 runabout 回复客户端的说明里。默认 false。
+	Instructions bool `yaml:"instructions,omitempty"`
 }
 
 // Extensions 控制可选扩展工具。所有扩展默认关闭，不改变默认工具列表。

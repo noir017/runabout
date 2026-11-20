@@ -261,6 +261,7 @@ upstreams: []
 #    tools: ["list_items", "read_item"]  # 必填白名单，白名单外的一律不暴露
 #    refresh_interval: 10m              # 工具列表刷新间隔，默认 10m
 #    timeout: 60s                       # 单次上游请求超时，默认 60s
+#    instructions: false                # 是否把上游 initialize 的说明追加到 runabout 说明里
 #
 #  - name: local                        # stdio 上游：启动时拉起子进程
 #    command: ["node", "/opt/example/server.mjs"]

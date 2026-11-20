@@ -108,6 +108,7 @@ upstreams:
     tools: ["list_items", "read_item"]  # 必填白名单
     refresh_interval: 10m              # 默认 10m
     timeout: 60s                       # 默认 60s
+    instructions: false                # 是否把上游 initialize 的说明追加到 runabout 的说明里
 
   - name: local                        # stdio 上游
     command: ["node", "/opt/example/server.mjs"]
@@ -121,6 +122,7 @@ upstreams:
 - HTTP 上游走 Streamable HTTP；`token_env` 指向存放 Bearer 令牌的环境变量，令牌在每次请求时读取，配置文件里不写明文凭据。
 - stdio 上游在启动时拉起子进程，在一条 stdin/stdout 上使用按行分隔的 JSON-RPC；请求并发多路复用，按 id 匹配响应。子进程环境只有 `PATH`、`HOME`、`LANG` 加上 `env` 里的字面值，不继承 runabout 的其他环境变量；`workdir` 必须是绝对路径。stderr 按行写进 runabout 日志，过长的行会截断。
 - 子进程退出时，在飞请求立即失败；之后按既有的重试退避重启，重启后重新 initialize 再服务调用。关停时先关 stdin，最多等几秒让在飞请求处理完，超时再 kill 进程组。
+- `instructions: true` 时，把上游 `initialize` 结果里的 `instructions` 追加到 runabout 自己的说明后面，段头写明上游名与工具名前缀（工具名为 `<prefix>_<原名>`）。还没连上的上游跳过；每段上限 8 KiB，超长截断并记一条 warn。
 - 启动后在后台立即拉取工具列表，之后按 `refresh_interval` 定期刷新；描述、标题与 `inputSchema` 都来自上游。
 - 只暴露白名单内的工具。对外工具集合由配置固定，上游宕机时 `tools/list` 仍然稳定。
 - 工具定义有体积上限：`tools/list` 单页 4 MiB、所有分页累计 32 MiB；每个工具的 name、title、description 和 `inputSchema` 在解码时立即检查（128 B / 1 KiB / 64 KiB / 256 KiB）。白名单内的工具超限时只跳过本次刷新：沿用上一版定义（没有上一版则用占位定义），其余工具照常更新，每个坏工具只记一条 warn，不会让整次刷新失败。

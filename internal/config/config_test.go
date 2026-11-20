@@ -167,6 +167,9 @@ func TestUpstreamStdioConfig(t *testing.T) {
 	if len(u.Command) != 2 || u.Command[1] != "/opt/example/server.mjs" {
 		t.Errorf("command 应原样保留，实际 %v", u.Command)
 	}
+	if u.Instructions {
+		t.Error("instructions 默认应为 false")
+	}
 	if u.RefreshInterval != 10*time.Minute || u.Timeout != 60*time.Second {
 		t.Errorf("默认值不对: refresh=%v timeout=%v", u.RefreshInterval, u.Timeout)
 	}

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/noir017/runabout/internal/config"
 	"github.com/noir017/runabout/internal/mcp"
@@ -18,6 +20,8 @@ const (
 	retryBaseDelay = 5 * time.Second
 	// retryMaxDelay 是退避的上限。
 	retryMaxDelay = time.Minute
+	// maxInstructionsPerUpstream 限制单个上游追加到说明里的文本长度。
+	maxInstructionsPerUpstream = 8 << 10
 )
 
 // Manager 持有所有上游连接与最近一次拉取到的工具定义。
@@ -289,6 +293,44 @@ func (m *Manager) Call(ctx context.Context, upstreamName, tool string, args json
 	res.Content = parsed.Content
 	res.IsError = parsed.IsError
 	return res, nil
+}
+
+// Instructions 汇总开启了 instructions 且已握手成功的上游说明。
+// 每段带段头，写明上游名与工具名前缀；还没连上的上游直接跳过。
+func (m *Manager) Instructions() string {
+	var b strings.Builder
+	for _, ep := range m.order {
+		if !ep.cfg.Instructions {
+			continue
+		}
+		text := strings.TrimSpace(ep.client.Instructions())
+		if text == "" {
+			continue
+		}
+		if len(text) > maxInstructionsPerUpstream {
+			text = truncateUTF8(text, maxInstructionsPerUpstream) + "…"
+			m.log.Warn("上游 instructions 超过长度上限，已截断",
+				"upstream", ep.cfg.Name, "limit", maxInstructionsPerUpstream)
+		}
+		b.WriteString("\n\n## 上游 ")
+		b.WriteString(ep.cfg.Name)
+		b.WriteString(" 的说明（工具名前缀 ")
+		b.WriteString(ep.cfg.Prefix)
+		b.WriteString("_）\n\n")
+		b.WriteString(text)
+	}
+	return b.String()
+}
+
+// truncateUTF8 按字节截断但保证不切开一个 UTF-8 字符。
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func (ep *endpoint) buildDef(t Tool) mcp.ToolDef {

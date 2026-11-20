@@ -439,3 +439,22 @@ func TestManagerStdioUpstream(t *testing.T) {
 	}
 }
 
+// TestManagerStdioInstructions 验证 stdio 上游的 instructions 也会被转发。
+func TestManagerStdioInstructions(t *testing.T) {
+	cfg := stdioConfig(t, "echo", map[string]string{"RB_STDIO_INSTRUCTIONS": "stdio 上游说明"})
+	cfg.Tools = []string{"echo"}
+	cfg.Instructions = true
+	m := New([]config.Upstream{cfg}, discardLogger())
+	defer m.Close()
+
+	if err := m.RefreshAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := m.Instructions()
+	if !strings.Contains(got, "## 上游 helper 的说明（工具名前缀 hp_）") {
+		t.Errorf("段头应写明上游名与前缀:\n%s", got)
+	}
+	if !strings.Contains(got, "stdio 上游说明") {
+		t.Errorf("应追加 stdio 上游说明:\n%s", got)
+	}
+}

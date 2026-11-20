@@ -106,6 +106,7 @@ upstreams:
     tools: ["list_items", "read_item"]  # required whitelist
     refresh_interval: 10m              # default 10m
     timeout: 60s                       # default 60s
+    instructions: false                # append the upstream's initialize instructions
 
   - name: local                        # stdio upstream
     command: ["node", "/opt/example/server.mjs"]
@@ -119,6 +120,7 @@ upstreams:
 - HTTP upstreams use Streamable HTTP; `token_env` names the environment variable holding the Bearer token. Tokens are read at request time; do not put credentials in the config file.
 - stdio upstreams are spawned at startup and speak newline-delimited JSON-RPC on one stdin/stdout. Requests are multiplexed concurrently and matched by id. The child environment contains only `PATH`, `HOME`, `LANG` plus the literal values in `env`; nothing else is inherited. `workdir` must be an absolute path. stderr is logged line by line, with long lines truncated.
 - If a stdio child exits, in-flight calls fail immediately. The child is restarted with the usual retry backoff and re-initialized before serving calls again. On shutdown runabout closes stdin, waits a few seconds for in-flight calls, then kills the process group.
+- `instructions: true` stores the `instructions` from the upstream's `initialize` result and appends it to runabout's own instructions, under a header naming the upstream and its tool prefix (`<prefix>_<tool>`). Upstreams that have not connected yet are skipped. Each section is capped at 8 KiB; longer text is truncated and a warning is logged.
 - The tool list is fetched in the background at startup and refreshed every `refresh_interval`. Descriptions, titles and `inputSchema` come from the upstream.
 - Only whitelisted tools are exposed. The exposed name set is fixed by config, so `tools/list` stays stable even while the upstream is down.
 - Tool definitions are size-bounded. A single `tools/list` page is capped at 4 MiB and all pages together at 32 MiB; each tool's name, title, description and `inputSchema` are checked as soon as the page is decoded (128 B / 1 KiB / 64 KiB / 256 KiB). A whitelisted tool that exceeds a limit is skipped for that refresh only: it keeps its previous definition (or a placeholder if there is none), other tools still update, and runabout logs one warning per tool instead of failing the whole refresh.
