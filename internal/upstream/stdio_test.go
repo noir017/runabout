@@ -106,6 +106,15 @@ func runStdioHelper() {
 				map[string]any{"name": "slow", "description": "慢工具", "inputSchema": map[string]any{"type": "object"}},
 				map[string]any{"name": "secret", "description": "白名单外", "inputSchema": map[string]any{"type": "object"}},
 			}})
+			if mode == "close-stdout" {
+				// 只关闭输出端，进程继续活着。
+				_ = os.Stdout.Close()
+				time.Sleep(24 * time.Hour)
+			}
+			if mode == "stuck" {
+				// 不再读 stdin，让客户端的写操作把管道塞满。
+				time.Sleep(24 * time.Hour)
+			}
 		case "tools/call":
 			var p struct {
 				Name      string          `json:"name"`
@@ -114,6 +123,13 @@ func runStdioHelper() {
 			_ = json.Unmarshal(req.Params, &p)
 			if crashOnCall {
 				os.Exit(3)
+			}
+			if mode == "exit-after-call" && p.Name == "echo" {
+				// 先写出响应再立刻退出，验证客户端不会丢掉管道里的最后一行。
+				respond(id, map[string]any{
+					"content": []any{map[string]any{"type": "text", "text": "echo:" + string(p.Arguments)}},
+				})
+				os.Exit(0)
 			}
 			wg.Add(1)
 			go func(id any, name string, args json.RawMessage) {
@@ -374,6 +390,79 @@ func TestStdioCallTimeout(t *testing.T) {
 	}
 }
 
+// TestStdioResponseBeforeExit 验证子进程写完响应就退出时，最后一行不会被丢掉。
+func TestStdioResponseBeforeExit(t *testing.T) {
+	c := newStdioClient(stdioConfig(t, "exit-after-call", nil), discardLogger())
+	defer c.Close()
+
+	ctx := context.Background()
+	if _, err := c.ListTools(ctx); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := c.CallTool(ctx, "echo", json.RawMessage(`{"msg":"last"}`))
+	if err != nil {
+		t.Fatalf("子进程退出前写出的响应不应丢失: %v", err)
+	}
+	var res struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Content) != 1 || res.Content[0].Text != `echo:{"msg":"last"}` {
+		t.Errorf("响应内容不对: %s", raw)
+	}
+}
+
+// TestStdioStdoutClosedFailsInflight 验证 stdout 被关闭时，
+// 在飞请求立即失败，而不是一直等到 context 超时。
+func TestStdioStdoutClosedFailsInflight(t *testing.T) {
+	c := newStdioClient(stdioConfig(t, "close-stdout", nil), discardLogger())
+	c.shutdownWait = 100 * time.Millisecond
+	defer c.Close()
+
+	if _, err := c.ListTools(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := c.CallTool(ctx, "echo", nil); err == nil {
+		t.Fatal("stdout 关闭后调用应失败")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("stdout 关闭应让在飞请求立即失败，实际等了 %v", d)
+	}
+}
+
+// TestStdioWriteStuckProcess 验证子进程不读 stdin 时，写操作不会无限阻塞：
+// 请求超时后判定失联并 kill，writeMu 不会被永久占住。
+func TestStdioWriteStuckProcess(t *testing.T) {
+	c := newStdioClient(stdioConfig(t, "stuck", nil), discardLogger())
+	c.shutdownWait = 100 * time.Millisecond
+	defer c.Close()
+
+	if _, err := c.ListTools(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	big := json.RawMessage(fmt.Sprintf(`{"blob":%q}`, strings.Repeat("x", 256<<10)))
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := c.CallTool(ctx, "echo", big)
+	if err == nil {
+		t.Fatal("子进程不读 stdin 时调用应超时失败")
+	}
+	if !strings.Contains(err.Error(), "超时") {
+		t.Errorf("错误应说明写入超时，实际: %v", err)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("写卡住不应无限阻塞，实际等了 %v", d)
+	}
+}
+
 // TestChildEnvIsolated 验证子进程只拿到 PATH/HOME/LANG 与配置里的字面值。
 func TestChildEnvIsolated(t *testing.T) {
 	t.Setenv("RB_TEST_SECRET_LEAK", "must-not-leak")
@@ -396,6 +485,7 @@ func TestChildEnvIsolated(t *testing.T) {
 func TestStdioStderrTruncation(t *testing.T) {
 	var buf bytes.Buffer
 	p := &stdioProc{name: "helper", log: slog.New(slog.NewTextHandler(&buf, nil))}
+	p.readers.Add(1)
 	long := strings.Repeat("x", maxStderrLineBytes+100)
 	p.logStderr(strings.NewReader(long + "\n第二行\n"))
 	out := buf.String()

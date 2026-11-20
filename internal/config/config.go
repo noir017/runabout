@@ -687,7 +687,8 @@ func (c *Config) normalizeUpstreams() error {
 			return fmt.Errorf("upstreams[%d] 必须配置 url（HTTP 上游）或 command（stdio 上游）", i)
 		}
 		if len(u.Command) > 0 {
-			if strings.TrimSpace(u.Command[0]) == "" {
+			u.Command[0] = strings.TrimSpace(u.Command[0])
+			if u.Command[0] == "" {
 				return fmt.Errorf("upstreams[%d].command 的第一项不能为空", i)
 			}
 			if strings.TrimSpace(u.TokenEnv) != "" {
@@ -713,8 +714,11 @@ func (c *Config) normalizeUpstreams() error {
 			if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" {
 				return fmt.Errorf("upstreams[%d].url 不能带 query 或 fragment，当前为 %q", i, redactURL(u.URL))
 			}
-			if len(u.Env) > 0 || u.Workdir != "" {
-				return fmt.Errorf("upstreams[%d] 的 env 与 workdir 只用于 stdio 上游（配置 command）", i)
+			if len(u.Env) > 0 {
+				return fmt.Errorf("upstreams[%d].env 只用于 stdio 上游（配置 command）", i)
+			}
+			if u.Workdir != "" {
+				return fmt.Errorf("upstreams[%d].workdir 只用于 stdio 上游（配置 command）", i)
 			}
 		}
 

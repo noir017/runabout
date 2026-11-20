@@ -194,16 +194,20 @@ func (c *stdioClient) start(ctx context.Context) (*stdioProc, error) {
 	}
 
 	p := &stdioProc{
-		name:    c.cfg.Name,
-		log:     c.log,
-		cmd:     cmd,
-		stdin:   stdin,
-		pending: map[int64]chan rpcResult{},
-		exited:  make(chan struct{}),
+		name:         c.cfg.Name,
+		log:          c.log,
+		cmd:          cmd,
+		stdin:        stdin,
+		pending:      map[int64]chan rpcResult{},
+		exited:       make(chan struct{}),
+		writeTimeout: c.cfg.Timeout,
 	}
-	go p.waitLoop()
+	// 先登记两个读端，再启动 goroutine；waitLoop 会等它们读到 EOF 再 Wait，
+	// 避免 cmd.Wait 提前关闭管道读端、丢掉子进程退出前写出的最后一段输出。
+	p.readers.Add(2)
 	go p.readLoop(stdout)
 	go p.logStderr(stderr)
+	go p.waitLoop()
 
 	if err := p.initialize(ctx); err != nil {
 		p.kill()
@@ -258,10 +262,16 @@ type stdioProc struct {
 	diedAt   time.Time
 	instr    string
 
+	// writeTimeout 是单次写入的硬上限：即使调用方没给 ctx 截止时间，
+	// 子进程不读 stdin 时也不能让写入无限阻塞。
+	writeTimeout time.Duration
+
 	failOnce sync.Once
 	// exited 在进程被回收后关闭。
 	exited chan struct{}
-	nextID atomic.Int64
+	// readers 跟踪 stdout/stderr 的读取 goroutine。
+	readers sync.WaitGroup
+	nextID  atomic.Int64
 }
 
 func (p *stdioProc) isDead() bool {
@@ -305,6 +315,8 @@ func (p *stdioProc) fail(err error) {
 }
 
 func (p *stdioProc) waitLoop() {
+	// 管道里的数据读完之后才能 Wait：Wait 会关闭读端。
+	p.readers.Wait()
 	err := p.cmd.Wait()
 	reason := "exit 0"
 	if err != nil {
@@ -315,16 +327,22 @@ func (p *stdioProc) waitLoop() {
 }
 
 func (p *stdioProc) readLoop(r io.Reader) {
+	defer p.readers.Done()
+
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64<<10), maxResponseBytes)
 	for scanner.Scan() {
 		p.handleLine(scanner.Bytes())
 	}
+	// 无论是 EOF 还是读错误，只要进程还没标记退出，就让在飞请求立即失败，
+	// 并杀掉进程；否则请求会被继续发给一个再也读不到响应的进程。
 	if err := scanner.Err(); err != nil {
 		p.log.Warn("读取上游输出失败", "upstream", p.name, "err", err)
-		// 行过长或读错误说明帧格式已不可恢复，直接杀掉，让上层按退避重启。
-		p.kill()
+		p.fail(fmt.Errorf("读取上游输出失败: %w", err))
+	} else {
+		p.fail(fmt.Errorf("上游 stdout 已关闭"))
 	}
+	p.kill()
 }
 
 func (p *stdioProc) handleLine(line []byte) {
@@ -380,9 +398,8 @@ func (p *stdioProc) request(ctx context.Context, method string, params any, limi
 	p.pending[id] = ch
 	p.mu.Unlock()
 
-	if err := p.write(payload); err != nil {
+	if err := p.write(ctx, payload); err != nil {
 		p.removePending(id)
-		err = fmt.Errorf("写入上游进程失败: %w", err)
 		p.fail(err)
 		return nil, 0, err
 	}
@@ -409,14 +426,41 @@ func (p *stdioProc) removePending(id int64) {
 	p.mu.Unlock()
 }
 
-func (p *stdioProc) write(payload []byte) error {
-	p.writeMu.Lock()
-	defer p.writeMu.Unlock()
+// write 把一条消息写进子进程 stdin。子进程不读 stdin 时写操作可能永久阻塞，
+// 所以放到独立 goroutine 里；ctx 结束或写入超过硬上限就判定失联并 kill，
+// 让写操作尽快返回，避免 writeMu 被永久占住。
+func (p *stdioProc) write(ctx context.Context, payload []byte) error {
 	buf := make([]byte, 0, len(payload)+1)
 	buf = append(buf, payload...)
 	buf = append(buf, '\n')
-	_, err := p.stdin.Write(buf)
-	return err
+
+	timeout := p.writeTimeout
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	wctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		p.writeMu.Lock()
+		defer p.writeMu.Unlock()
+		_, err := p.stdin.Write(buf)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("写入上游进程失败: %w", err)
+		}
+		return nil
+	case <-wctx.Done():
+		err := fmt.Errorf("写入上游进程超时: %w", wctx.Err())
+		p.fail(err)
+		p.kill()
+		return err
+	}
 }
 
 func (p *stdioProc) initialize(ctx context.Context) error {
@@ -440,7 +484,7 @@ func (p *stdioProc) initialize(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := p.write(payload); err != nil {
+	if err := p.write(ctx, payload); err != nil {
 		return fmt.Errorf("发送 initialized 通知失败: %w", err)
 	}
 	p.mu.Lock()
@@ -456,6 +500,8 @@ func (p *stdioProc) initialize(ctx context.Context) error {
 
 // logStderr 把子进程 stderr 按行写进日志，单行超长时截断。
 func (p *stdioProc) logStderr(r io.Reader) {
+	defer p.readers.Done()
+
 	br := bufio.NewReaderSize(r, 32<<10)
 	var buf []byte
 	truncated := false
@@ -503,7 +549,8 @@ func (p *stdioProc) logStderrLine(line []byte, truncated bool) {
 
 // kill 杀掉整个进程组；进程组不可用时退回单进程 kill。
 func (p *stdioProc) kill() {
-	if p.cmd.Process == nil {
+	// pid 为 0 或负数时 kill(-pid) 会命中 runabout 自己的进程组，必须先挡住。
+	if p.cmd.Process == nil || p.cmd.Process.Pid <= 0 {
 		return
 	}
 	pid := p.cmd.Process.Pid

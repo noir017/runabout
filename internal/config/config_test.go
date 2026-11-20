@@ -151,7 +151,7 @@ func TestUpstreamStdioConfig(t *testing.T) {
 	cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x"}}
 	cfg.Upstreams = []Upstream{{
 		Name:    "node",
-		Command: []string{"node", "/opt/example/server.mjs"},
+		Command: []string{" node ", "/opt/example/server.mjs"},
 		Env:     map[string]string{"EXAMPLE_TOKEN": "literal", "LANG": "C"},
 		Workdir: "/opt/example",
 		Prefix:  "nd",
@@ -164,8 +164,8 @@ func TestUpstreamStdioConfig(t *testing.T) {
 	if u.URL != "" {
 		t.Errorf("stdio 上游不应有 url，实际 %q", u.URL)
 	}
-	if len(u.Command) != 2 || u.Command[1] != "/opt/example/server.mjs" {
-		t.Errorf("command 应原样保留，实际 %v", u.Command)
+	if len(u.Command) != 2 || u.Command[0] != "node" || u.Command[1] != "/opt/example/server.mjs" {
+		t.Errorf("command 首项应 trim，其余原样保留，实际 %v", u.Command)
 	}
 	if u.Instructions {
 		t.Error("instructions 默认应为 false")
@@ -214,8 +214,9 @@ func TestUpstreamConfigRejectsInvalid(t *testing.T) {
 			c.Upstreams[0].Command = []string{"node"}
 			c.Upstreams[0].Env = map[string]string{"1BAD": "x"}
 		},
-		"HTTP 带 env": func(c *Config) { c.Upstreams[0].Env = map[string]string{"A": "b"} },
-		"与内置工具重名":    func(c *Config) { c.Upstreams[0].Prefix = "shell"; c.Upstreams[0].Tools = []string{"output"} },
+		"HTTP 带 env":     func(c *Config) { c.Upstreams[0].Env = map[string]string{"A": "b"} },
+		"HTTP 带 workdir": func(c *Config) { c.Upstreams[0].Workdir = "/opt/example" },
+		"与内置工具重名":        func(c *Config) { c.Upstreams[0].Prefix = "shell"; c.Upstreams[0].Tools = []string{"output"} },
 		"跨上游重名": func(c *Config) {
 			second := valid()
 			second.Name = "other"
