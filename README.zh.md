@@ -559,7 +559,7 @@ make test-policy
 集成类工具统一放在 `extensions` 配置区块下，**默认全部关闭**，不改变核心工具集。启用后复用 `fleet` 执行通道、输出截断、超时、`allowed_targets` 校验与审计日志：
 
 - `extensions.skill`：注册 `skill`（`list | search | read`），桥接目标机器上 `fleetherd skills` 的 BM25 检索与读取能力。
-- `extensions.fleetherd_task`：注册 `fleetherd_task`（严格白名单 `agents | new | send | read | list | status`），以 argv 安全传参调用 `fleetherd task-*`；带 `session_ref` 时仅在工具内部读取 `web-bridge` 映射并注入环境变量（明文 `FLEETHERD_TURN_TOKEN` 绝不落日志、绝不回显给模型），无 `session_ref` 时支持通过 `parent_topic` 或可配置的 `empty_topic_command` 挂载子任务。
+- `extensions.fleetherd_task`：注册 `fleetherd_task`（严格白名单 `agents | new | send | read | list | status | stop`），以 argv 安全传参调用 `fleetherd task-*`；带 `session_ref` 时仅在工具内部读取 `web-bridge` 映射并注入环境变量（明文 `FLEETHERD_TURN_TOKEN` 绝不落日志、绝不回显给模型），无 `session_ref` 时支持通过 `parent_topic` 或可配置的 `empty_topic_command` 挂载子任务。`stop` 必填 `topic`，转发为 `task-stop`。
 
 ## 架构
 

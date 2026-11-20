@@ -115,7 +115,7 @@ case "$cmd" in
     # 故意把 token 回显出来以验证 runabout 会脱敏
     printf 'topic_id=child-topic-777\nargs=%s\nleak=%s\n' "$*" "$FLEETHERD_TURN_TOKEN"
     ;;
-  task-send|task-read|tasks|task-status)
+  task-send|task-read|tasks|task-status|task-stop)
     printf 'CMD:%s|args=%s\n' "$cmd" "$*"
     ;;
   *)
@@ -276,7 +276,24 @@ func TestFleetherdTaskExtensionTool(t *testing.T) {
 		t.Errorf("应返回 parent_topic 并通过 -c 挂载子任务:\n%s", out)
 	}
 
-	// 4. 白名单校验与路径穿越防护。
+	// 4. stop 转发 task-stop，topic 必填且沿用同一套校验。
+	out, isErr = call(t, ft, map[string]any{"action": "stop", "topic": "child-topic-777"})
+	if isErr {
+		t.Fatalf("action=stop 失败: %s", out)
+	}
+	if !strings.Contains(out, "CMD:task-stop|args=-- child-topic-777") {
+		t.Errorf("action=stop 应转发 task-stop:\n%s", out)
+	}
+	for _, bad := range []map[string]any{
+		{"action": "stop"},
+		{"action": "stop", "topic": "../bad"},
+	} {
+		if out, isErr := call(t, ft, bad); !isErr {
+			t.Errorf("非法 stop 调用 %v 应被拒绝，实际成功: %s", bad, out)
+		}
+	}
+
+	// 5. 白名单校验与路径穿越防护。
 	for _, bad := range []map[string]any{
 		{"action": "reload"},
 		{"action": "config"},
