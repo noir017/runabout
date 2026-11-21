@@ -125,9 +125,14 @@ func TestUpstreamConfig(t *testing.T) {
 	}
 
 	cfg := base()
+	tr := true
+	fa := false
 	cfg.Upstreams = []Upstream{{
 		Name: "fd", URL: "http://127.0.0.1:9000/mcp", Prefix: "fd",
 		TokenEnv: "FD_MCP_TOKEN", Tools: []string{" topic_list ", "topic_read", "topic_list"},
+		ToolAnnotations: map[string]UpstreamToolAnnotations{
+			" topic_list ": {Title: " 列表 ", ReadOnlyHint: &tr, DestructiveHint: &fa},
+		},
 	}}
 	if err := cfg.Normalize(); err != nil {
 		t.Fatal(err)
@@ -135,6 +140,10 @@ func TestUpstreamConfig(t *testing.T) {
 	u := cfg.Upstreams[0]
 	if u.Tools[0] != "topic_list" || len(u.Tools) != 2 {
 		t.Errorf("工具白名单应 trim 并去重，实际 %v", u.Tools)
+	}
+	ann, ok := u.ToolAnnotations["topic_list"]
+	if !ok || ann.Title != "列表" || ann.ReadOnlyHint == nil || !*ann.ReadOnlyHint || ann.DestructiveHint == nil || *ann.DestructiveHint {
+		t.Errorf("tool_annotations 应按 trim 后的工具名保留，实际 %+v", u.ToolAnnotations)
 	}
 	if u.RefreshInterval != 10*time.Minute || u.Timeout != 60*time.Second {
 		t.Errorf("默认值不对: refresh=%v timeout=%v", u.RefreshInterval, u.Timeout)
@@ -217,6 +226,12 @@ func TestUpstreamConfigRejectsInvalid(t *testing.T) {
 		"HTTP 带 env":     func(c *Config) { c.Upstreams[0].Env = map[string]string{"A": "b"} },
 		"HTTP 带 workdir": func(c *Config) { c.Upstreams[0].Workdir = "/opt/example" },
 		"与内置工具重名":        func(c *Config) { c.Upstreams[0].Prefix = "shell"; c.Upstreams[0].Tools = []string{"output"} },
+		"annotations 工具不在白名单": func(c *Config) {
+			tr := true
+			c.Upstreams[0].ToolAnnotations = map[string]UpstreamToolAnnotations{
+				"not_in_whitelist": {ReadOnlyHint: &tr},
+			}
+		},
 		"跨上游重名": func(c *Config) {
 			second := valid()
 			second.Name = "other"

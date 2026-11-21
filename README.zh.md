@@ -147,7 +147,7 @@ runabout 的设计目标是运行在反向代理或 Tunnel 后面，而不是直
 启用上游透传后还有两条边界：
 
 - 所有透传工具共用 `token_env` 指定的一把上游令牌。runabout 不按调用方或工具拆分该令牌，上游工具也**不受** `auth.static_tokens[].allowed_targets` 与 `auth.client_policies` 约束。
-- 上游的 `annotations` 原样透传。runabout 不校验 `readOnlyHint`，也不对上游调用套用自己的 shell 与路径策略；真正的权限边界在上游。
+- 上游的 `annotations` 默认原样透传，也可通过 `tool_annotations` 按工具覆写（如给未声明 annotations 的只读工具补 `read_only: true`）。runabout 不校验 `readOnlyHint`，也不对上游调用套用自己的 shell 与路径策略；真正的权限边界在上游。
 - stdio 上游以 runabout 的 OS 权限运行子进程。runabout 只收窄它的环境变量（`PATH`、`HOME`、`LANG` 加 `env`），并不构成沙箱。
 
 runabout 不依赖外部身份提供商。客户端注册（RFC 7591）、授权码 + PKCE、Token 签发和 Token 轮换均由本地服务处理。

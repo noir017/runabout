@@ -265,6 +265,11 @@ upstreams: []
 #    token_env: "EXAMPLE_MCP_TOKEN"    # Bearer 令牌的环境变量名；留空表示不带鉴权
 #    prefix: "ex"                       # 对外工具名为 ex_<工具名>
 #    tools: ["list_items", "read_item"]  # 必填白名单，白名单外的一律不暴露
+#    tool_annotations:                  # 可选：按工具覆写 MCP annotations（只覆盖填写的字段）
+#      list_items:
+#        read_only: true
+#        destructive: false
+#        idempotent: true
 #    refresh_interval: 10m              # 工具列表刷新间隔，默认 10m
 #    timeout: 60s                       # 单次上游请求超时，默认 60s
 #    instructions: false                # 是否把上游 initialize 的说明追加到 runabout 说明里

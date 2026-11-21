@@ -349,6 +349,7 @@ func (ep *endpoint) buildDef(t Tool) mcp.ToolDef {
 			def.Annotations = &ann
 		}
 	}
+	def.Annotations = ep.mergeAnnotations(t.Name, def.Annotations)
 	return def
 }
 
@@ -361,6 +362,7 @@ func (ep *endpoint) fallbackDef(tool string, fetched bool) mcp.ToolDef {
 		Name:        ep.cfg.Prefix + "_" + tool,
 		Description: desc,
 		InputSchema: fallbackSchema(),
+		Annotations: ep.mergeAnnotations(tool, nil),
 	}
 }
 
@@ -373,7 +375,41 @@ func (ep *endpoint) oversizedDef(tool string) mcp.ToolDef {
 			"上游 %s 的工具 %s 定义超过大小上限，本次未更新；调用仍会原样转发。",
 			ep.cfg.Name, tool),
 		InputSchema: fallbackSchema(),
+		Annotations: ep.mergeAnnotations(tool, nil),
 	}
+}
+
+// mergeAnnotations 把配置里显式填写的 tool_annotations 字段叠加到上游 annotations 上；
+// 未配置的字段保留上游原值，两者都为空时返回 nil。
+func (ep *endpoint) mergeAnnotations(tool string, base *mcp.ToolAnnotations) *mcp.ToolAnnotations {
+	ov, ok := ep.cfg.ToolAnnotations[tool]
+	if !ok {
+		return base
+	}
+	if ov.Title == "" && ov.ReadOnlyHint == nil && ov.DestructiveHint == nil &&
+		ov.IdempotentHint == nil && ov.OpenWorldHint == nil {
+		return base
+	}
+	var merged mcp.ToolAnnotations
+	if base != nil {
+		merged = *base
+	}
+	if ov.Title != "" {
+		merged.Title = ov.Title
+	}
+	if ov.ReadOnlyHint != nil {
+		merged.ReadOnlyHint = mcp.Ptr(*ov.ReadOnlyHint)
+	}
+	if ov.DestructiveHint != nil {
+		merged.DestructiveHint = mcp.Ptr(*ov.DestructiveHint)
+	}
+	if ov.IdempotentHint != nil {
+		merged.IdempotentHint = mcp.Ptr(*ov.IdempotentHint)
+	}
+	if ov.OpenWorldHint != nil {
+		merged.OpenWorldHint = mcp.Ptr(*ov.OpenWorldHint)
+	}
+	return &merged
 }
 
 func fallbackSchema() map[string]any {

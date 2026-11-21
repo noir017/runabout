@@ -145,7 +145,7 @@ Security comes from several layers:
 Upstream passthrough adds two boundaries to be aware of:
 
 - All passthrough tools share the single upstream token named by `token_env`. runabout does not scope that token per caller or per tool, and upstream tools are **not** constrained by `auth.static_tokens[].allowed_targets` or `auth.client_policies`.
-- Upstream `annotations` are forwarded as-is. runabout does not verify `readOnlyHint`, and its shell and path policy does not apply to upstream calls; the upstream's own permissions are the boundary.
+- Upstream `annotations` are forwarded as-is and can be overridden per tool via `tool_annotations` (for example, adding `read_only: true` for read-only upstream tools that omit annotations). runabout does not verify `readOnlyHint`, and its shell and path policy does not apply to upstream calls; the upstream's own permissions are the boundary.
 - stdio upstreams run as child processes with runabout's OS privileges. runabout narrows their environment to `PATH`, `HOME`, `LANG` plus `env`, but it is not a sandbox.
 
 Do not treat runabout's policy as a replacement for Linux permissions. A process that can run unrestricted `sudo` can usually bypass application-level restrictions.

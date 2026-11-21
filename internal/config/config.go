@@ -57,6 +57,9 @@ type Upstream struct {
 	Prefix string `yaml:"prefix"`
 	// Tools 是允许透传的上游工具白名单，必填。白名单之外的工具不会被暴露。
 	Tools []string `yaml:"tools"`
+	// ToolAnnotations 按上游工具名覆写 MCP ToolAnnotations 提示（只覆盖显式填写的字段）。
+	// 用于给不返回 annotations 的上游补齐 readOnlyHint 等提示，避免客户端把只读工具当写操作弹确认。
+	ToolAnnotations map[string]UpstreamToolAnnotations `yaml:"tool_annotations,omitempty"`
 	// RefreshInterval 是重新拉取工具列表的间隔，默认 10m。
 	RefreshInterval time.Duration `yaml:"refresh_interval,omitempty"`
 	// Timeout 是单次上游请求（含 tools/call）的超时，默认 60s。
@@ -64,6 +67,16 @@ type Upstream struct {
 	// Instructions 为 true 时，把上游 initialize 返回的 instructions
 	// 追加到 runabout 回复客户端的说明里。默认 false。
 	Instructions bool `yaml:"instructions,omitempty"`
+}
+
+// UpstreamToolAnnotations 用于在配置里按工具覆写 MCP ToolAnnotations 提示。
+// 未填写的字段保持 nil/空字符串，合并时保留上游原值。
+type UpstreamToolAnnotations struct {
+	Title           string `yaml:"title,omitempty"`
+	ReadOnlyHint    *bool  `yaml:"read_only,omitempty"`
+	DestructiveHint *bool  `yaml:"destructive,omitempty"`
+	IdempotentHint  *bool  `yaml:"idempotent,omitempty"`
+	OpenWorldHint   *bool  `yaml:"open_world,omitempty"`
 }
 
 // Extensions 控制可选扩展工具。所有扩展默认关闭，不改变默认工具列表。
@@ -794,6 +807,22 @@ func (c *Config) normalizeUpstreams() error {
 			cleaned = append(cleaned, tool)
 		}
 		u.Tools = cleaned
+
+		if len(u.ToolAnnotations) > 0 {
+			cleanedAnn := make(map[string]UpstreamToolAnnotations, len(u.ToolAnnotations))
+			for rawName, ann := range u.ToolAnnotations {
+				tool := strings.TrimSpace(rawName)
+				if !seenTool[tool] {
+					return fmt.Errorf("upstreams[%d].tool_annotations 里的工具名 %q 不在 tools 白名单中", i, rawName)
+				}
+				if _, dup := cleanedAnn[tool]; dup {
+					return fmt.Errorf("upstreams[%d].tool_annotations 里的工具名 %q 重复", i, tool)
+				}
+				ann.Title = strings.TrimSpace(ann.Title)
+				cleanedAnn[tool] = ann
+			}
+			u.ToolAnnotations = cleanedAnn
+		}
 
 		if u.RefreshInterval <= 0 {
 			u.RefreshInterval = 10 * time.Minute

@@ -889,6 +889,73 @@ func TestManagerDefinitionsAndWhitelist(t *testing.T) {
 	}
 }
 
+func TestManagerToolAnnotationsOverride(t *testing.T) {
+	fake := newFake()
+	fake.tools = []Tool{
+		{
+			Name:        "plain",
+			Description: "无 annotations 的只读工具",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		{
+			Name:        "partial",
+			Description: "带部分 annotations 的工具",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+			Annotations: json.RawMessage(`{"title":"上游标题","readOnlyHint":false,"openWorldHint":true}`),
+		},
+	}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	tr, fa := true, false
+	cfg := config.Upstream{
+		Name:   "fake",
+		URL:    srv.URL,
+		Prefix: "fk",
+		Tools:  []string{"plain", "partial"},
+		ToolAnnotations: map[string]config.UpstreamToolAnnotations{
+			"plain": {
+				ReadOnlyHint:    &tr,
+				DestructiveHint: &fa,
+				IdempotentHint:  &tr,
+			},
+			"partial": {
+				ReadOnlyHint:    &tr,
+				DestructiveHint: &fa,
+			},
+		},
+		Timeout: 2 * time.Second,
+	}
+	m := New([]config.Upstream{cfg}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// 刷新前 fallbackDef 也应携带配置的 annotations，避免重启首次 tools/list 被当写工具缓存。
+	pre := m.Definition("fake", "fk", "plain")
+	if pre.Annotations == nil || pre.Annotations.ReadOnlyHint == nil || !*pre.Annotations.ReadOnlyHint ||
+		pre.Annotations.DestructiveHint == nil || *pre.Annotations.DestructiveHint {
+		t.Fatalf("刷新前占位定义应套用 tool_annotations，实际: %+v", pre.Annotations)
+	}
+
+	if err := m.RefreshAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	plain := m.Definition("fake", "fk", "plain")
+	if plain.Annotations == nil || plain.Annotations.ReadOnlyHint == nil || !*plain.Annotations.ReadOnlyHint ||
+		plain.Annotations.DestructiveHint == nil || *plain.Annotations.DestructiveHint ||
+		plain.Annotations.IdempotentHint == nil || !*plain.Annotations.IdempotentHint {
+		t.Errorf("plain 应补全配置的 annotations，实际: %+v", plain.Annotations)
+	}
+
+	// partial 配置只覆写 read_only 与 destructive，上游原有的 title 与 openWorldHint 应保留。
+	partial := m.Definition("fake", "fk", "partial")
+	if partial.Annotations == nil || partial.Annotations.Title != "上游标题" ||
+		partial.Annotations.ReadOnlyHint == nil || !*partial.Annotations.ReadOnlyHint ||
+		partial.Annotations.DestructiveHint == nil || *partial.Annotations.DestructiveHint ||
+		partial.Annotations.OpenWorldHint == nil || !*partial.Annotations.OpenWorldHint {
+		t.Errorf("partial 应按字段合并 annotations，实际: %+v", partial.Annotations)
+	}
+}
+
 func TestManagerUnreachableUpstream(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1/mcp")
 	cfg.Timeout = 300 * time.Millisecond
