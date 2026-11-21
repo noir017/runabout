@@ -22,6 +22,7 @@ import (
 
 	"github.com/noir017/runabout/internal/config"
 	"github.com/noir017/runabout/internal/mcp"
+	"github.com/noir017/runabout/internal/media"
 )
 
 func writePNG(t *testing.T, path string, w, h int) []byte {
@@ -386,5 +387,253 @@ func TestReadRemoteFakeImageUsesTextLimit(t *testing.T) {
 	}
 	if strings.Contains(string(log), "cat --") {
 		t.Errorf("判定为文本前不应把整个文件拉回来: %s", log)
+	}
+}
+
+// ---------- image_url：按需临时图片链接 ----------
+
+func enableImageURL(t *testing.T, d *Deps, opts media.Options) {
+	t.Helper()
+	d.Cfg.Server.BaseURL = "https://mcp.example.com"
+	d.Media = media.New(opts)
+	t.Cleanup(d.Media.Close)
+}
+
+func hasImageBlock(res *mcp.CallToolResult) bool {
+	for _, c := range res.Content {
+		if c.Type == "image" {
+			return true
+		}
+	}
+	return false
+}
+
+func readSchemaProps(t *testing.T, d *Deps) (string, map[string]any) {
+	t.Helper()
+	def := (&readTool{d: d}).Definition()
+	schema, _ := def.InputSchema.(map[string]any)
+	props, _ := schema["properties"].(map[string]any)
+	return def.Description, props
+}
+
+// 未启用 image_url 时，read 的 schema、说明与读图结果都和以前完全一样。
+func TestReadImageURLOffKeepsNativeImage(t *testing.T) {
+	d, dir := newTestDeps(t)
+	desc, props := readSchemaProps(t, d)
+	if _, ok := props["image_url"]; ok {
+		t.Error("未启用时 schema 不应出现 image_url")
+	}
+	if strings.Contains(desc, "image_url") {
+		t.Errorf("未启用时说明里不应提 image_url:\n%s", desc)
+	}
+
+	path := filepath.Join(dir, "a.png")
+	original := writePNG(t, path, 60, 40)
+	res := callRaw(t, &readTool{d: d}, map[string]any{"path": path})
+	if res.IsError {
+		t.Fatalf("读图失败: %s", textOf(res))
+	}
+	if data, _ := findImage(t, res); !bytes.Equal(data, original) {
+		t.Error("默认应照常返回原生 image 块")
+	}
+	if strings.Contains(textOf(res), "image_url") {
+		t.Errorf("未启用时不应附加 image_url 提示:\n%s", textOf(res))
+	}
+	meta := res.StructuredContent.(map[string]any)
+	if _, ok := meta["url"]; ok {
+		t.Error("默认不应生成临时链接")
+	}
+}
+
+func TestReadImageURLDisabledRejects(t *testing.T) {
+	d, dir := newTestDeps(t)
+	path := filepath.Join(dir, "a.png")
+	writePNG(t, path, 20, 20)
+	out, isErr := call(t, &readTool{d: d}, map[string]any{"path": path, "image_url": true})
+	if !isErr {
+		t.Fatal("未启用时传 image_url=true 应返回错误")
+	}
+	if !strings.Contains(out, "未启用") || !strings.Contains(out, "tools.fs.image_url") {
+		t.Errorf("错误应说明服务端未启用及对应配置项:\n%s", out)
+	}
+}
+
+// 启用后不传 image_url：仍返回原生 image 块，末尾多一句切换提示。
+func TestReadImageURLEnabledDefaultsToNative(t *testing.T) {
+	d, dir := newTestDeps(t)
+	enableImageURL(t, d, media.Options{})
+
+	desc, props := readSchemaProps(t, d)
+	prop, ok := props["image_url"].(map[string]any)
+	if !ok || prop["type"] != "boolean" {
+		t.Fatalf("启用后 schema 应有布尔参数 image_url，实际 %v", props["image_url"])
+	}
+	pdesc, _ := prop["description"].(string)
+	for _, want := range []string{"默认 false", "无法直接展示 MCP 图片", "5 分钟内有效", "HTTPS", "下载到本地"} {
+		if !strings.Contains(pdesc, want) {
+			t.Errorf("image_url 参数说明缺少 %q:\n%s", want, pdesc)
+		}
+	}
+	for _, want := range []string{"image_url=true", "无法直接展示 MCP 图片块", "HTTPS 临时下载链接"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("工具说明缺少 %q:\n%s", want, desc)
+		}
+	}
+	if strings.Contains(strings.ToLower(desc+pdesc), "gemini") {
+		t.Error("说明不应写死特定客户端名")
+	}
+
+	path := filepath.Join(dir, "a.png")
+	original := writePNG(t, path, 60, 40)
+	res := callRaw(t, &readTool{d: d}, map[string]any{"path": path})
+	if res.IsError {
+		t.Fatalf("读图失败: %s", textOf(res))
+	}
+	if data, _ := findImage(t, res); !bytes.Equal(data, original) {
+		t.Error("不传 image_url 时应照常返回原生 image 块")
+	}
+	last := res.Content[len(res.Content)-1]
+	if last.Type != "text" || last.Text != imageURLHint {
+		t.Errorf("结果末尾应附切换提示，实际 %+v", last)
+	}
+	if _, ok := res.StructuredContent.(map[string]any)["url"]; ok {
+		t.Error("不传 image_url 时不应生成临时链接")
+	}
+}
+
+func TestReadImageURLReturnsLink(t *testing.T) {
+	d, dir := newTestDeps(t)
+	enableImageURL(t, d, media.Options{})
+	path := filepath.Join(dir, "a.png")
+	original := writePNG(t, path, 60, 40)
+
+	before := time.Now()
+	res := callRaw(t, &readTool{d: d}, map[string]any{"path": path, "image_url": true})
+	if res.IsError {
+		t.Fatalf("读图失败: %s", textOf(res))
+	}
+	if hasImageBlock(res) {
+		t.Error("image_url=true 时不应再返回 image 块")
+	}
+	meta := res.StructuredContent.(map[string]any)
+	link, _ := meta["url"].(string)
+	const prefix = "https://mcp.example.com/media/"
+	if !strings.HasPrefix(link, prefix) {
+		t.Fatalf("structuredContent.url 应为 base_url/media/<token>，实际 %q", link)
+	}
+	exp, err := time.Parse(time.RFC3339, meta["url_expires_at"].(string))
+	if err != nil {
+		t.Fatalf("url_expires_at 应为 RFC3339: %v", err)
+	}
+	if d := exp.Sub(before); d < 4*time.Minute || d > 6*time.Minute {
+		t.Errorf("过期时间应约为 5 分钟后，实际相差 %v", d)
+	}
+
+	text := textOf(res)
+	for _, want := range []string{link, "5 分钟内有效", meta["url_expires_at"].(string), "HTTP GET", "curl", ".png", "删除该临时文件", "image_url=true"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("返回文本缺少 %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, imageURLHint) {
+		t.Error("链接模式下不应再附切换提示")
+	}
+
+	data, mime, ok := d.Media.Get(strings.TrimPrefix(link, prefix))
+	if !ok || mime != "image/png" || !bytes.Equal(data, original) {
+		t.Errorf("临时仓库里应是处理后的图片: ok=%v mime=%s", ok, mime)
+	}
+}
+
+// 链接模式存的是压缩后的图片，不是原图。
+func TestReadImageURLStoresCompressed(t *testing.T) {
+	d, dir := newTestDeps(t)
+	enableImageURL(t, d, media.Options{OneTime: true})
+	d.Cfg.Tools.FS.ImageMaxEdge = 200
+	path := filepath.Join(dir, "big.png")
+	writePNG(t, path, 600, 300)
+
+	res := callRaw(t, &readTool{d: d}, map[string]any{"path": path, "image_url": true})
+	if res.IsError {
+		t.Fatalf("读图失败: %s", textOf(res))
+	}
+	if !strings.Contains(textOf(res), "只能下载一次") || !strings.Contains(textOf(res), ".jpg") {
+		t.Errorf("一次性链接应说明只能下载一次，扩展名应随压缩后的 JPEG:\n%s", textOf(res))
+	}
+	link := res.StructuredContent.(map[string]any)["url"].(string)
+	data, mime, ok := d.Media.Get(link[strings.LastIndex(link, "/")+1:])
+	if !ok || mime != "image/jpeg" {
+		t.Fatalf("应存压缩后的 JPEG: ok=%v mime=%s", ok, mime)
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil || img.Bounds().Dx() != 200 {
+		t.Errorf("存的图片尺寸不对: %v %v", err, img)
+	}
+}
+
+func TestReadImageURLWithVision(t *testing.T) {
+	d, dir := newTestDeps(t)
+	enableImageURL(t, d, media.Options{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"界面显示：保存成功。"}}]}`))
+	}))
+	defer srv.Close()
+	d.Cfg.Tools.FS.Vision = config.VisionCfg{BaseURL: srv.URL, Model: "m", Timeout: time.Second}
+	path := filepath.Join(dir, "ui.png")
+	writePNG(t, path, 40, 20)
+
+	res := callRaw(t, &readTool{d: d}, map[string]any{"path": path, "image_url": true})
+	if res.IsError {
+		t.Fatalf("读图失败: %s", textOf(res))
+	}
+	text := textOf(res)
+	if !strings.Contains(text, "视觉描述") || !strings.Contains(text, "保存成功") || !strings.Contains(text, "/media/") {
+		t.Errorf("链接模式下视觉描述应照常附加:\n%s", text)
+	}
+	if hasImageBlock(res) {
+		t.Error("链接模式下不应返回 image 块")
+	}
+}
+
+func TestReadImageURLStoreFull(t *testing.T) {
+	d, dir := newTestDeps(t)
+	enableImageURL(t, d, media.Options{MaxTotalBytes: 16})
+	path := filepath.Join(dir, "a.png")
+	writePNG(t, path, 40, 40)
+	out, isErr := call(t, &readTool{d: d}, map[string]any{"path": path, "image_url": true})
+	if !isErr || !strings.Contains(out, "生成临时下载链接失败") {
+		t.Errorf("放不进临时仓库时应明确报错:\n%s", out)
+	}
+}
+
+func TestReadTextIgnoresImageURL(t *testing.T) {
+	d, dir := newTestDeps(t)
+	enableImageURL(t, d, media.Options{})
+	path := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(path, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, isErr := call(t, &readTool{d: d}, map[string]any{"path": path, "image_url": true})
+	if isErr {
+		t.Fatalf("文本文件带 image_url 不应报错: %s", out)
+	}
+	if !strings.Contains(out, "hello") || !strings.Contains(out, "只对图片生效") {
+		t.Errorf("应照常读文本并说明 image_url 已忽略:\n%s", out)
+	}
+}
+
+func TestImageURLHelpers(t *testing.T) {
+	cases := map[time.Duration]string{
+		5 * time.Minute:         "5 分钟",
+		90 * time.Second:        "90 秒",
+		1500 * time.Millisecond: "1.5s",
+	}
+	for in, want := range cases {
+		if got := humanTTL(in); got != want {
+			t.Errorf("humanTTL(%v)=%q，期望 %q", in, got, want)
+		}
+	}
+	if linkKind("https://mcp.example.com") != "HTTPS" || linkKind("http://127.0.0.1:8484") != "HTTP" {
+		t.Error("linkKind 应按 scheme 区分")
 	}
 }

@@ -359,3 +359,69 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestImageURLDefaults(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x"}}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	iu := cfg.Tools.FS.ImageURL
+	if iu.Enabled || iu.OneTime || iu.TTL != 5*time.Minute || iu.MaxItems != 32 || iu.MaxTotalBytes != 64<<20 {
+		t.Errorf("image_url 默认值不对: %+v", iu)
+	}
+
+	// 只写 enabled 时，其余字段应补默认值。
+	cfg = Default()
+	cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x"}}
+	cfg.Tools.FS.ImageURL = ImageURLCfg{Enabled: true}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	iu = cfg.Tools.FS.ImageURL
+	if !iu.Enabled || iu.TTL != 5*time.Minute || iu.MaxItems != 32 || iu.MaxTotalBytes != 64<<20 {
+		t.Errorf("零值字段应补默认值: %+v", iu)
+	}
+}
+
+func TestImageURLYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	raw := `auth:
+  static_tokens: [{name: t, token: x}]
+server:
+  base_url: https://mcp.example.com
+tools:
+  fs:
+    image_url:
+      enabled: true
+      ttl: 2m
+      one_time: true
+      max_items: 4
+      max_total_bytes: 1048576
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ImageURLCfg{Enabled: true, TTL: 2 * time.Minute, OneTime: true, MaxItems: 4, MaxTotalBytes: 1 << 20}
+	if cfg.Tools.FS.ImageURL != want {
+		t.Errorf("image_url 解析结果不对: %+v", cfg.Tools.FS.ImageURL)
+	}
+}
+
+func TestImageURLRequiresBaseURL(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x"}}
+	cfg.Server.BaseURL = ""
+	cfg.Tools.FS.ImageURL.Enabled = true
+	err := cfg.Normalize()
+	if err == nil {
+		t.Fatal("启用 image_url 但 base_url 为空时应报错")
+	}
+	if !strings.Contains(err.Error(), "tools.fs.image_url") || !strings.Contains(err.Error(), "server.base_url") {
+		t.Errorf("错误信息应同时点出 image_url 与 base_url，实际: %v", err)
+	}
+}

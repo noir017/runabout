@@ -14,6 +14,7 @@ import (
 	"github.com/noir017/runabout/internal/config"
 	"github.com/noir017/runabout/internal/fleet"
 	"github.com/noir017/runabout/internal/mcp"
+	"github.com/noir017/runabout/internal/media"
 	"github.com/noir017/runabout/internal/policy"
 	"github.com/noir017/runabout/internal/upstream"
 )
@@ -29,7 +30,10 @@ type Deps struct {
 	Fleet   *fleet.Fleet
 	// Upstreams 是可选的上游 MCP 透传管理器；未配置 upstreams 时为 nil。
 	Upstreams *upstream.Manager
-	Log       *slog.Logger
+	// Media 是可选的临时媒体仓库；仅 tools.fs.image_url.enabled 时非 nil，
+	// 此时 read 才暴露 image_url 参数。
+	Media *media.Store
+	Log   *slog.Logger
 
 	localOnce  sync.Once
 	localFleet *fleet.Fleet

@@ -91,6 +91,8 @@ Images returned by `read` are downscaled and re-encoded as JPEG when their long 
 
 An optional vision model (`tools.fs.vision`, off by default) can append a text description of each image, for clients that do not pass MCP image blocks to the model. It calls an OpenAI-compatible `/chat/completions` endpoint; the API key is read from the environment variable named by `api_key_env`.
 
+Optional on-demand image links (`tools.fs.image_url`, off by default) add an `image_url` parameter to `read` (default `false`). Without it, `read` still returns the MCP image block, plus a one-line hint at the end. With `image_url=true`, `read` returns no image block; it keeps the processed image in memory and returns a `<server.base_url>/media/<token>` download link (valid for 5 minutes by default), so clients that cannot show MCP image blocks can download and view the image locally. `/media/` is not behind OAuth: it relies on a 256-bit random token and a short TTL, and the token is redacted from request logs. `server.base_url` must be reachable by the client, e.g. `https://mcp.example.com`.
+
 An optional `query` tool (`tools.query.enabled`, off by default) runs a whitelist of read-only commands (ls, cat, grep, journalctl, systemctl status, docker ps, …) without triggering confirmations. Options, subcommands and find predicates are checked against explicit allowlists; anything that cannot be proven read-only is rejected with a hint to use `shell`.
 
 ## Upstream MCP passthrough

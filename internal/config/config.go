@@ -265,6 +265,24 @@ type FSCfg struct {
 	MaxImageConcurrency int `yaml:"max_image_concurrency"`
 	// Vision 是读图后的可选视觉描述。BaseURL 与 Model 都非空才启用。
 	Vision VisionCfg `yaml:"vision"`
+	// ImageURL 是可选的按需临时图片链接，默认关闭。
+	ImageURL ImageURLCfg `yaml:"image_url"`
+}
+
+// ImageURLCfg 控制 read 的按需临时图片链接。启用后 read 多一个 image_url 参数：
+// 调用方显式传 true 时，处理后的图片放进内存临时仓库，返回
+// <server.base_url>/media/<token> 下载链接而不是 MCP image 块；不传时行为不变。
+// 下载端点不走 OAuth，靠 256-bit 随机 token 与短 TTL 保护。
+type ImageURLCfg struct {
+	Enabled bool `yaml:"enabled"`
+	// TTL 是链接有效期，默认 5m。
+	TTL time.Duration `yaml:"ttl"`
+	// OneTime 为 true 时链接下载一次即失效，默认 false（只靠 TTL 过期）。
+	OneTime bool `yaml:"one_time"`
+	// MaxItems 是内存里同时保留的图片张数上限，超出淘汰最旧的，默认 32。
+	MaxItems int `yaml:"max_items"`
+	// MaxTotalBytes 是内存里图片的总字节上限，超出淘汰最旧的，默认 64MB。
+	MaxTotalBytes int64 `yaml:"max_total_bytes"`
 }
 
 // VisionCfg 指向一个 OpenAI 兼容的 /chat/completions 接口。
@@ -367,6 +385,9 @@ func Default() *Config {
 				MaxImagePixels:      30_000_000,
 				MaxImageConcurrency: 2,
 				Vision:              VisionCfg{Timeout: 30 * time.Second},
+				ImageURL: ImageURLCfg{
+					TTL: 5 * time.Minute, MaxItems: 32, MaxTotalBytes: 64 << 20,
+				},
 			},
 			Search: SearchCfg{
 				UseRipgrep:    true,
@@ -457,6 +478,10 @@ func (c *Config) Normalize() error {
 	c.normalized = true
 	c.Server.BaseURL = strings.TrimRight(c.Server.BaseURL, "/")
 	if c.Server.BaseURL == "" {
+		if c.Tools.FS.ImageURL.Enabled {
+			return fmt.Errorf("tools.fs.image_url.enabled 为 true 时必须配置 server.base_url：" +
+				"临时图片链接拼成 <base_url>/media/<token>，需填客户端能访问到的地址，如 https://mcp.example.com")
+		}
 		return fmt.Errorf("server.base_url 不能为空")
 	}
 	u, err := url.Parse(c.Server.BaseURL)
@@ -501,6 +526,16 @@ func (c *Config) Normalize() error {
 	}
 	if c.Tools.FS.Vision.Timeout <= 0 {
 		c.Tools.FS.Vision.Timeout = 30 * time.Second
+	}
+	iu := &c.Tools.FS.ImageURL
+	if iu.TTL <= 0 {
+		iu.TTL = 5 * time.Minute
+	}
+	if iu.MaxItems <= 0 {
+		iu.MaxItems = 32
+	}
+	if iu.MaxTotalBytes <= 0 {
+		iu.MaxTotalBytes = 64 << 20
 	}
 	if c.Audit.Enabled && c.Audit.File == "" {
 		c.Audit.File = filepath.Join(c.Server.DataDir, "audit.jsonl")

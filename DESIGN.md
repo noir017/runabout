@@ -27,6 +27,7 @@ cmd/runabout        CLI：serve / hash-password / gen-token / check-policy
         ├── internal/tools     7 个默认 MCP 工具 + 配 fleet 时的 servers（另有 3 个保留实现但默认不暴露）
         ├── internal/fleet     机群执行层：本机 / ssh Runner，远端文件读写
         ├── internal/imaging   读图前的缩放、重编码与可选视觉描述
+        ├── internal/media     内存临时媒体仓库与 /media/<token> 下载端点（可选）
         ├── internal/policy    shell AST 解析、风险规则、路径黑名单、确认令牌
         ├── internal/audit     JSONL 审计日志
         ├── internal/config    配置结构、默认值、校验
@@ -147,6 +148,31 @@ OpenAI 兼容的 `/chat/completions` 接口：启用后 `read` 除了 image 块�
 - 错误文本不回显上游响应体；BaseURL 里的 userinfo、query 和 API key 会先抹掉再返回。
 - 这是同步调用，超时由 `vision.timeout` 控制（默认 30s），不要设得比客户端工具超时还长。
 
+### 按需临时图片链接（可选）
+
+视觉描述是文字兜底，丢细节。另一条路是让 agent 自己把图下载到本地，用客户端本地的看图能力看。
+`tools.fs.image_url.enabled` 打开后，`read` 多一个可选布尔参数 `image_url`：
+
+- **默认行为不变**：不传或传 `false` 时照常返回原生 image 块，不生成链接。既不影响能直接展示 MCP 图片的客户端，
+  也保留原生入口，方便以后验证客户端是否已支持 MCP 图片。只在结果末尾多一句提示，告诉看不到图的 agent 可以带 `image_url=true` 重读。
+- 传 `true` 时，压缩后的图片写进 `internal/media` 内存仓库，返回 `<server.base_url>/media/<token>`：
+  不再返回 image 块，只有文本说明（完整链接、有效期、下载后用本地看图工具打开、看完删临时文件）和
+  `structuredContent` 里的 `url`、`url_expires_at`。视觉描述照常附加。
+- 未启用时 schema 里没有 `image_url`；调用方硬传 `image_url=true` 会得到明确的未启用错误。对非图片文件 `image_url` 被忽略并注明。
+- 工具说明与提示只说"客户端无法直接展示 MCP 图片块时"，不写死任何客户端名。
+
+下载端点的安全取舍：
+
+- `/media/` 不挂 OAuth，因为拿链接去下载的一方（agent 侧的 curl 等）没有 Bearer。保护完全靠 token：
+  `crypto/rand` 生成的 32 字节（256-bit）随机数，RawURL base64 编码；有效期默认 5 分钟（`ttl`），可选 `one_time` 下载一次即失效（HEAD 不消费）。
+- token 就是凭据，所以请求日志与 panic 日志里的 `/media/<token>` 一律写成 `/media/[redacted]`；
+  工具返回正文本来就不进日志和审计。
+- 只允许 GET/HEAD，其余 405；缺失和过期都返回 404，不区分。响应带 `Cache-Control: no-store`、
+  `X-Content-Type-Options: nosniff` 和 sandbox CSP，内容只当图片用。
+- 内存有界：`max_items`（默认 32）和 `max_total_bytes`（默认 64MB）超限时淘汰最旧的；过期条目在读取时惰性删除，
+  另有后台协程定期清扫，进程关停时随 `Built.Close` 停止。重启即全部失效，这是有意的。
+- 启用时 `server.base_url` 不能为空，链接以它为前缀；它必须是客户端能访问的地址（通常是反代后的 https）。
+
 ### apply_patch 为什么用 V4A 格式
 
 选了 codex 那套 `*** Begin Patch` / `@@` 信封，而不是标准 unified diff，理由：
@@ -260,12 +286,16 @@ HTTP 调用有超时，但编译、备份、压测动辄几分钟。所以 `shel
   子命令级拦截（systemctl/docker/ip/find/journalctl）和"不能借 query 读私钥"。
 - `internal/imaging/*_test.go`：长边缩放、体积超限时的质量/尺寸收敛、像素上限、GIF 首帧、BMP/WebP 解码，
   以及视觉接口的成功、HTTP 失败、空描述和超时。
+- `internal/media/store_test.go`：token 熵与拷贝语义、TTL 过期与后台清扫、按条数/字节淘汰最旧、
+  one_time（HEAD 不消费）、下载端点的 405/404 与安全响应头。
 - `internal/tools/tools_test.go`：apply_patch 的更新/新增/删除/重命名/dry-run/空白容错/
   **失败时不落盘**、read 的行号与二进制拒绝、write 的原子与追加、search/glob 的忽略规则、
-  shell 的超时/stdin/后台任务全链路。
+  shell 的超时/stdin/后台任务全链路；`image_test.go` 覆盖读图默认原生返回、`image_url=true` 链接模式、
+  未启用时报错与切换提示文案。
 - `internal/app/e2e_test.go`：起真实 HTTP 服务，跑完整的动态注册 → 授权 → 登录 → 换令牌 →
   initialize → tools/list → 调工具；并验证 401 挑战头、授权码不可重放、
-  确认令牌不可挪用/不可复用、被拦命令确实没执行。
+  确认令牌不可挪用/不可复用、被拦命令确实没执行；开启 `image_url` 时还跑通"读图拿链接 → 不带令牌下载 →
+  日志里只有 `/media/[redacted]`"。
 - `internal/config/config_test.go`：**校验 `configs/config.example.yaml` 能被严格模式解析**，
   防止示例配置和结构体脱节——这种问题通常要等部署时才暴露。
 

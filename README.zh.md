@@ -93,6 +93,8 @@ fleet:
 
 可选开启视觉描述（`tools.fs.vision`，默认关闭）：客户端看不到 MCP 图片块时，`read` 会再附一段文字说明。接口需兼容 OpenAI 的 `/chat/completions`，API key 只从 `api_key_env` 指定的环境变量读取。
 
+可选开启按需临时图片链接（`tools.fs.image_url`，默认关闭）：开启后 `read` 多一个 `image_url` 参数（默认 `false`）。不传时照常返回 MCP 图片块，只在末尾多一句提示；传 `image_url=true` 时不再返回图片块，改为把处理后的图片放进内存，返回 `<server.base_url>/media/<token>` 下载链接（默认 5 分钟有效），给无法直接展示 MCP 图片的客户端下载到本地查看。`/media/` 不走 OAuth，靠 256-bit 随机 token 加短有效期保护，请求日志里 token 会被抹掉；`server.base_url` 必须是客户端能访问到的地址，例如 `https://mcp.example.com`。
+
 可选开启只读查询工具 `query`（`tools.query.enabled`，默认关闭）：它只执行白名单内的只读命令（ls、cat、grep、journalctl、systemctl status、docker ps 等），不会触发确认；选项、子命令和 find 谓词都按允许列表校验，无法证明只读的命令会被拒绝并提示改用 `shell`。
 
 ## 上游 MCP 透传

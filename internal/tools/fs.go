@@ -26,6 +26,8 @@ type readArgs struct {
 	Offset int    `json:"offset"`
 	Limit  int    `json:"limit"`
 	Raw    bool   `json:"raw"`
+	// ImageURL 仅在服务端启用 tools.fs.image_url 时出现在 schema 里。
+	ImageURL bool `json:"image_url"`
 }
 
 func (t *readTool) Definition() mcp.ToolDef {
@@ -38,6 +40,21 @@ func (t *readTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 	if t.d.fleetEnabled() {
 		remoteDoc = "\n- 远端图片同样直接返回图像；读不到时先用 shell 确认路径和权限。"
 	}
+	props := map[string]any{
+		"path":   strProp("文件路径，绝对或相对（相对于默认工作目录）"),
+		"offset": intProp("起始行号，从 1 开始", 1, 0),
+		"limit":  intProp("最多读取多少行", 1, 0),
+		"raw":    boolProp("不输出行号"),
+	}
+	urlDoc := ""
+	if t.d.Media != nil {
+		ttl, kind := humanTTL(t.d.Media.TTL()), linkKind(t.d.Cfg.Server.BaseURL)
+		urlDoc = fmt.Sprintf("\n- 若当前客户端无法直接展示 MCP 图片块（看不到图片画面），可传 image_url=true："+
+			"改为返回 %s内有效的 %s 临时下载链接（不再返回图像块），把它下载到本地后用本地看图能力查看。", ttl, kind)
+		props["image_url"] = boolProp(fmt.Sprintf("仅对图片生效，默认 false（直接返回图像块）。"+
+			"若当前客户端无法直接展示 MCP 图片块，传 true 改为返回 %s内有效的 %s 临时下载链接，"+
+			"下载到本地后用本地文件/图片查看工具打开。", ttl, kind))
+	}
 	return mcp.ToolDef{
 		Name:  "read",
 		Title: "读取文件",
@@ -46,17 +63,12 @@ func (t *readTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 - 默认从第 1 行起最多 %d 行；大文件请用 offset/limit 分段读。
 - 单行超过 %d 字符会被截断。
 - raw=true 时不加行号，适合需要原样内容的场景。
-- 图片（png/jpg/gif/webp/bmp）会以图像形式返回；长边超过 %d 像素或处理后超过 %s 时自动缩小并转成 JPEG。%s
+- 图片（png/jpg/gif/webp/bmp）会以图像形式返回；长边超过 %d 像素或处理后超过 %s 时自动缩小并转成 JPEG。%s%s
 - 服务端启用视觉描述时，图片后还会附一段文字说明。
 - 其他二进制文件会被拒绝，请改用 shell 里的 xxd/file。
 - 少数凭据类文件（私钥、云凭据等）被策略禁止读取，会返回明确错误。`,
-			fs.DefaultLines, fs.MaxLineChars, fs.ImageMaxEdge, humanBytes(int64(fs.MaxImageBytes)), remoteDoc),
-		InputSchema: t.d.schemaWithTargetFor(p, map[string]any{
-			"path":   strProp("文件路径，绝对或相对（相对于默认工作目录）"),
-			"offset": intProp("起始行号，从 1 开始", 1, 0),
-			"limit":  intProp("最多读取多少行", 1, 0),
-			"raw":    boolProp("不输出行号"),
-		}, "path"),
+			fs.DefaultLines, fs.MaxLineChars, fs.ImageMaxEdge, humanBytes(int64(fs.MaxImageBytes)), remoteDoc, urlDoc),
+		InputSchema: t.d.schemaWithTargetFor(p, props, "path"),
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    mcp.Ptr(true),
 			IdempotentHint:  mcp.Ptr(true),
@@ -69,6 +81,10 @@ func (t *readTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 	var a readArgs
 	if err := decodeArgs(raw, &a); err != nil {
 		return nil, mcp.Errorf(mcp.CodeInvalidParams, "%s", err.Error())
+	}
+	if a.ImageURL && t.d.Media == nil {
+		return mcp.ToolError("服务端未启用临时图片链接（tools.fs.image_url.enabled），不支持 image_url=true；" +
+			"去掉该参数即可按原生图像块读取图片"), nil
 	}
 	target, err := t.d.resolveTargetFor(cc.Principal, a.Target)
 	if err != nil {
@@ -120,7 +136,7 @@ func (t *readTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 	}
 
 	if isImg {
-		return t.readImage(cc, label(target), abs, mime, data, auditTarget(target)), nil
+		return t.readImage(cc, label(target), abs, mime, data, auditTarget(target), a.ImageURL), nil
 	}
 	if isBinary(data) {
 		return mcp.ToolError("%s%s 看起来是二进制文件（%s）。如需查看请用 shell：file %s / xxd %s | head",
@@ -148,6 +164,9 @@ func (t *readTool) Call(cc *mcp.CallContext, raw json.RawMessage) (*mcp.CallTool
 	if meta["truncated_lines"] == true {
 		fmt.Fprintf(&header, "\n显示第 %v-%v 行；还有内容未显示，可继续用 offset=%v 读取",
 			meta["start_line"], meta["end_line"], meta["next_offset"])
+	}
+	if a.ImageURL {
+		header.WriteString("\n注意：image_url 只对图片生效，本次已忽略")
 	}
 	return mcp.Text(header.String() + "\n\n" + text).WithStructured(meta), nil
 }

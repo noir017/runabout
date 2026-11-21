@@ -1,10 +1,14 @@
 package app_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -37,6 +41,25 @@ type harness struct {
 	sessionID string
 	auditPath string
 	reqID     int
+	logs      *lockedBuffer
+}
+
+// lockedBuffer 收集服务日志；handler 在别的 goroutine 里写，读写都要加锁。
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 func newHarness(t *testing.T) *harness { return newHarnessWith(t, nil) }
@@ -65,7 +88,8 @@ func newHarnessWith(t *testing.T, tweak func(*config.Config)) *harness {
 		tweak(cfg)
 	}
 
-	built, err := app.Build(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	logs := &lockedBuffer{}
+	built, err := app.Build(cfg, slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	if err != nil {
 		t.Fatalf("装配服务失败: %v", err)
 	}
@@ -75,7 +99,7 @@ func newHarnessWith(t *testing.T, tweak func(*config.Config)) *harness {
 		srv.Close()
 		built.Close()
 	})
-	return &harness{t: t, srv: srv, base: base, workdir: workdir, auditPath: cfg.Audit.File}
+	return &harness{t: t, srv: srv, base: base, workdir: workdir, auditPath: cfg.Audit.File, logs: logs}
 }
 
 func (h *harness) get(path string) (*http.Response, []byte) {
@@ -1062,5 +1086,150 @@ func TestUpstreamUnreachableOverMCP(t *testing.T) {
 	out, isErr = h.callTool("shell", map[string]any{"command": "echo still-alive"})
 	if isErr || !strings.Contains(out, "still-alive") {
 		t.Errorf("上游故障不应影响 runabout 自身工具: %s", out)
+	}
+}
+
+// ---------- 按需临时图片链接 ----------
+
+func writeTestPNG(t *testing.T, path string, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, color.RGBA{R: uint8(x * 7), G: uint8(y * 5), B: 90, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func hasImageContent(res map[string]any) bool {
+	for _, c := range res["content"].([]any) {
+		if c.(map[string]any)["type"] == "image" {
+			return true
+		}
+	}
+	return false
+}
+
+// TestImageURLDisabledByDefault 钉住默认行为：read 不暴露 image_url，/media/ 不存在。
+func TestImageURLDisabledByDefault(t *testing.T) {
+	h := newHarness(t)
+	h.authorize()
+	h.rpc("initialize", map[string]any{"protocolVersion": "2025-06-18",
+		"clientInfo": map[string]any{"name": "t", "version": "1"}})
+	props := toolDef(t, h.rpc("tools/list", nil), "read")["inputSchema"].(map[string]any)["properties"].(map[string]any)
+	if _, ok := props["image_url"]; ok {
+		t.Error("未启用时 read 不应暴露 image_url")
+	}
+	path := filepath.Join(h.workdir, "shot.png")
+	writeTestPNG(t, path, 16, 16)
+	res := h.rpc("tools/call", map[string]any{"name": "read", "arguments": map[string]any{"path": path}})
+	if !hasImageContent(res) {
+		t.Error("默认应返回原生 image 块")
+	}
+	if resp, _ := h.get("/media/whatever"); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("未启用时 /media/ 应 404，实际 %d", resp.StatusCode)
+	}
+}
+
+// TestImageURLOverMCP 跑通：tools/list → 普通读图带提示 → image_url=true 拿链接 →
+// 不带令牌下载 → 方法/过期 token 校验 → 日志里看不到 token。
+func TestImageURLOverMCP(t *testing.T) {
+	h := newHarnessWith(t, func(c *config.Config) { c.Tools.FS.ImageURL.Enabled = true })
+	h.authorize()
+	h.rpc("initialize", map[string]any{"protocolVersion": "2025-06-18",
+		"clientInfo": map[string]any{"name": "t", "version": "1"}})
+
+	read := toolDef(t, h.rpc("tools/list", nil), "read")
+	props := read["inputSchema"].(map[string]any)["properties"].(map[string]any)
+	if _, ok := props["image_url"]; !ok {
+		t.Fatal("启用后 read 应暴露 image_url")
+	}
+
+	path := filepath.Join(h.workdir, "shot.png")
+	original := writeTestPNG(t, path, 32, 24)
+
+	// 不传 image_url：仍是原生 image 块，外加切换提示。
+	out, isErr := h.callTool("read", map[string]any{"path": path})
+	if isErr || !strings.Contains(out, "image_url=true") {
+		t.Errorf("普通读图应附切换提示:\n%s", out)
+	}
+	if !hasImageContent(h.rpc("tools/call", map[string]any{"name": "read", "arguments": map[string]any{"path": path}})) {
+		t.Error("不传 image_url 时应照常返回 image 块")
+	}
+
+	// image_url=true：只有文本 + structuredContent.url。
+	res := h.rpc("tools/call", map[string]any{"name": "read",
+		"arguments": map[string]any{"path": path, "image_url": true}})
+	if hasImageContent(res) {
+		t.Error("image_url=true 时不应返回 image 块")
+	}
+	sc := res["structuredContent"].(map[string]any)
+	link, _ := sc["url"].(string)
+	if !strings.HasPrefix(link, h.base+"/media/") || sc["url_expires_at"] == nil {
+		t.Fatalf("structuredContent 应带 url 与 url_expires_at: %v", sc)
+	}
+	token := strings.TrimPrefix(link, h.base+"/media/")
+
+	// 下载端点不需要 Bearer。
+	resp, err := http.Get(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK || body != string(original) {
+		t.Fatalf("下载应返回原图字节，状态 %d，%d 字节", resp.StatusCode, len(body))
+	}
+	for k, want := range map[string]string{
+		"Content-Type": "image/png", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+		"Content-Length": fmt.Sprint(len(original)),
+	} {
+		if got := resp.Header.Get(k); got != want {
+			t.Errorf("%s 应为 %q，实际 %q", k, want, got)
+		}
+	}
+
+	resp, err = http.Post(link, "text/plain", strings.NewReader("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("POST 应返回 405，实际 %d", resp.StatusCode)
+	}
+	if resp, _ := h.get("/media/not-a-real-token"); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("未知 token 应 404，实际 %d", resp.StatusCode)
+	}
+
+	// 请求日志在 handler 返回后才写，稍等一下。
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(h.logs.String(), "/media/[redacted]") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	logs := h.logs.String()
+	if !strings.Contains(logs, "/media/[redacted]") {
+		t.Errorf("请求日志应把 /media/ 路径脱敏:\n%s", logs)
+	}
+	if strings.Contains(logs, token) {
+		t.Error("日志里不应出现下载 token")
+	}
+}
+
+// TestImageURLRequiresBaseURLAtBuild 确认装配时也走配置校验。
+func TestImageURLRequiresBaseURLAtBuild(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.BaseURL = ""
+	cfg.Auth.Enabled = false
+	cfg.Tools.FS.ImageURL.Enabled = true
+	if _, err := app.Build(cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil ||
+		!strings.Contains(err.Error(), "image_url") {
+		t.Errorf("启用 image_url 但 base_url 为空时 Build 应报错，实际 %v", err)
 	}
 }

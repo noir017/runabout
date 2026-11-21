@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/noir017/runabout/internal/config"
 	"github.com/noir017/runabout/internal/fleet"
 	"github.com/noir017/runabout/internal/mcp"
+	"github.com/noir017/runabout/internal/media"
 	"github.com/noir017/runabout/internal/policy"
 	"github.com/noir017/runabout/internal/tools"
 	"github.com/noir017/runabout/internal/upstream"
@@ -109,6 +111,12 @@ func Build(cfg *config.Config, log *slog.Logger) (*Built, error) {
 		Upstreams: upMgr,
 		Log:       log,
 	}
+	if iu := cfg.Tools.FS.ImageURL; iu.Enabled {
+		deps.Media = media.New(media.Options{
+			TTL: iu.TTL, OneTime: iu.OneTime, MaxItems: iu.MaxItems, MaxTotalBytes: iu.MaxTotalBytes,
+		})
+		log.Info("临时图片链接已启用", "ttl", iu.TTL, "one_time", iu.OneTime)
+	}
 
 	mcpSrv := mcp.NewServer(mcp.Implementation{
 		Name: "runabout", Title: "服务器基础工具集", Version: Version,
@@ -137,6 +145,11 @@ func Build(cfg *config.Config, log *slog.Logger) (*Built, error) {
 	mux.Handle("/mcp", authSrv.Protect(transport))
 	// 有些客户端习惯在末尾带斜杠。
 	mux.Handle("/mcp/", authSrv.Protect(transport))
+	if deps.Media != nil {
+		// 不挂 OAuth：拿到链接去下载的一方（客户端侧的下载工具）没有 Bearer。
+		// 保护靠 256-bit 随机 token + 短 TTL，token 不进日志（见 logPath）。
+		mux.Handle(media.PathPrefix, deps.Media.Handler())
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"status": "ok", "version": Version,
@@ -159,6 +172,9 @@ func Build(cfg *config.Config, log *slog.Logger) (*Built, error) {
 		Tools:   mcpSrv.ToolNames(),
 		Close: func() {
 			upMgr.Close()
+			if deps.Media != nil {
+				deps.Media.Close()
+			}
 			deps.Procs.KillAll()
 			_ = aud.Close()
 		},
@@ -264,7 +280,7 @@ func withRecover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				slog.Error("HTTP handler panic", "panic", rec, "path", r.URL.Path)
+				slog.Error("HTTP handler panic", "panic", rec, "path", logPath(r.URL.Path))
 				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 			}
 		}()
@@ -297,7 +313,16 @@ func withRequestLog(log *slog.Logger, next http.Handler) http.Handler {
 		if r.URL.Path == "/healthz" {
 			return
 		}
-		log.Debug("http", "method", r.Method, "path", r.URL.Path,
+		log.Debug("http", "method", r.Method, "path", logPath(r.URL.Path),
 			"status", rec.status, "dur_ms", time.Since(start).Milliseconds())
 	})
+}
+
+// logPath 抹掉路径里的凭据：/media/<token> 的 token 本身就是下载凭据，不能落日志。
+// 先 Clean 再判断，"//media/<token>" 这类会被 mux 重定向的写法也一并抹掉。
+func logPath(p string) string {
+	if strings.HasPrefix(path.Clean(p)+"/", media.PathPrefix) {
+		return media.PathPrefix + "[redacted]"
+	}
+	return p
 }

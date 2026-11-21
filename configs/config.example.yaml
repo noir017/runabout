@@ -123,6 +123,21 @@ tools:
       api_key_env: ""
       timeout: 30s
 
+    # 可选：按需临时图片链接，默认关闭；关闭时 read 的参数和返回与以前完全一样。
+    # 开启后 read 多一个 image_url 参数（默认 false）：不传照常返回 MCP 图像块；
+    # 传 true 时把处理后的图片放进内存临时仓库，改为返回 <server.base_url>/media/<token>
+    # 下载链接，给无法直接展示 MCP 图片的客户端下载到本地查看。
+    # /media/ 不走 OAuth，靠 256-bit 随机 token + 短有效期保护：有效期内拿到链接的人都能下载。
+    # server.base_url 必须是客户端能访问到的地址（通常是反代后的 https 地址，如 https://mcp.example.com）。
+    image_url:
+      enabled: false
+      ttl: 5m
+      # true 时链接下载一次即失效（HEAD 不算）；默认只靠 ttl 过期。
+      one_time: false
+      # 内存里最多保留的图片张数与总字节数，超出淘汰最旧的。
+      max_items: 32
+      max_total_bytes: 67108864
+
   search:
     # 有 rg 就用 rg（快且尊重 .gitignore），没有则回退内置实现。
     use_ripgrep: true
