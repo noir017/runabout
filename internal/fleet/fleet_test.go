@@ -316,3 +316,162 @@ func TestFleetExposeLocalFalse(t *testing.T) {
 		}
 	})
 }
+
+// writeCountingSSH 写一个记录调用次数的假 ssh 脚本，供重试边界单测使用。
+func writeCountingSSH(t *testing.T, body string) (scriptPath, countFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	countFile = filepath.Join(dir, "attempts")
+	scriptPath = filepath.Join(dir, "fake-ssh")
+	script := "#!/bin/sh\n" +
+		"n=0\n" +
+		"if [ -f " + Quote(countFile) + " ]; then n=$(cat " + Quote(countFile) + "); fi\n" +
+		"n=$((n + 1))\n" +
+		"printf '%d' \"$n\" > " + Quote(countFile) + "\n" +
+		body + "\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return scriptPath, countFile
+}
+
+func readAttemptCount(t *testing.T, countFile string) int {
+	t.Helper()
+	data, err := os.ReadFile(countFile)
+	if err != nil {
+		t.Fatalf("读取调用次数失败: %v", err)
+	}
+	var n int
+	for _, b := range strings.TrimSpace(string(data)) {
+		n = n*10 + int(b-'0')
+	}
+	return n
+}
+
+func TestSSHRetryTransientKeyRaceSucceeds(t *testing.T) {
+	script, countFile := writeCountingSSH(t, `
+if [ "$n" -eq 1 ]; then
+  echo 'identity_sign: private key /tmp/test-key contents do not match public' >&2
+  echo 'user@web1: Permission denied (publickey).' >&2
+  exit 255
+fi
+cat
+`)
+	s := NewSSH([]string{script}, nil)
+	s.keyRaceBackoffs = []time.Duration{5 * time.Millisecond, 10 * time.Millisecond}
+
+	res, err := s.Run(context.Background(), Spec{
+		SSH:     "web1",
+		Command: "cat",
+		Stdin:   "payload-preserved",
+	})
+	if err != nil {
+		t.Fatalf("第 2 次应重试成功，得到错误: %v", err)
+	}
+	if res.ExitCode != 0 || res.Stdout != "payload-preserved" {
+		t.Errorf("重试后结果异常: %+v", res)
+	}
+	if got := readAttemptCount(t, countFile); got != 2 {
+		t.Errorf("应调用 2 次，实际 %d 次", got)
+	}
+}
+
+func TestSSHRetryTransientKeyRaceExhausted(t *testing.T) {
+	script, countFile := writeCountingSSH(t, `
+echo 'identity_sign: private key /tmp/test-key contents do not match public' >&2
+echo 'user@web1: Permission denied (publickey).' >&2
+exit 255
+`)
+	s := NewSSH([]string{script}, nil)
+	s.keyRaceBackoffs = []time.Duration{5 * time.Millisecond, 5 * time.Millisecond}
+
+	_, err := s.Run(context.Background(), Spec{SSH: "web1", Command: "true"})
+	var ce *ConnectError
+	if !errors.As(err, &ce) {
+		t.Fatalf("重试耗尽后应返回 ConnectError，得到: %v", err)
+	}
+	if got := readAttemptCount(t, countFile); got != 3 {
+		t.Errorf("首次 + 2 次重试共应调用 3 次，实际 %d 次", got)
+	}
+}
+
+func TestSSHRetryBoundaries(t *testing.T) {
+	cases := []struct {
+		name        string
+		body        string
+		wantConnect bool
+	}{
+		{
+			name:        "普通 Permission denied 不重试",
+			body:        `echo 'user@web1: Permission denied (publickey).' >&2; exit 255`,
+			wantConnect: true,
+		},
+		{
+			name:        "连接被拒不重试",
+			body:        `echo 'ssh: connect to host web1 port 22: Connection refused' >&2; exit 255`,
+			wantConnect: true,
+		},
+		{
+			name:        "已有 stdout 输出后中断严禁重试",
+			body:        `echo 'already-started'; echo 'identity_sign: private key /tmp/test-key contents do not match public' >&2; echo 'user@web1: Permission denied (publickey).' >&2; exit 255`,
+			wantConnect: true,
+		},
+		{
+			name:        "未报认证失败的远端 255 退出码严禁重试",
+			body:        `echo 'identity_sign: private key /tmp/test-key contents do not match public' >&2; exit 255`,
+			wantConnect: false,
+		},
+		{
+			name:        "远端非 255 退出码严禁重试",
+			body:        `echo 'identity_sign: private key /tmp/test-key contents do not match public' >&2; echo 'user@web1: Permission denied (publickey).' >&2; exit 1`,
+			wantConnect: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script, countFile := writeCountingSSH(t, tc.body)
+			s := NewSSH([]string{script}, nil)
+			s.keyRaceBackoffs = []time.Duration{5 * time.Millisecond, 5 * time.Millisecond}
+
+			_, err := s.Run(context.Background(), Spec{SSH: "web1", Command: "non-idempotent-cmd"})
+			var ce *ConnectError
+			gotConnect := errors.As(err, &ce)
+			if gotConnect != tc.wantConnect {
+				t.Errorf("ConnectError 判定不符: got=%v want=%v (err=%v)", gotConnect, tc.wantConnect, err)
+			}
+			if got := readAttemptCount(t, countFile); got != 1 {
+				t.Errorf("该场景严禁重试，期望调用 1 次，实际 %d 次", got)
+			}
+		})
+	}
+}
+
+func TestSSHRetryStopsOnContextCancel(t *testing.T) {
+	script, countFile := writeCountingSSH(t, `
+echo 'identity_sign: private key /tmp/test-key contents do not match public' >&2
+echo 'user@web1: Permission denied (publickey).' >&2
+exit 255
+`)
+	s := NewSSH([]string{script}, nil)
+	s.keyRaceBackoffs = []time.Duration{5 * time.Second, 5 * time.Second}
+
+	ctx := withTimeout(t, 80*time.Millisecond)
+	start := time.Now()
+	res, err := s.Run(ctx, Spec{SSH: "web1", Command: "true"})
+	elapsed := time.Since(start)
+
+	var ce *ConnectError
+	if !errors.As(err, &ce) {
+		t.Fatalf("退避期超时应返回 ConnectError，得到: %v", err)
+	}
+	if !res.TimedOut {
+		t.Errorf("退避期超时应设置 TimedOut=true: %+v", res)
+	}
+	if elapsed >= time.Second {
+		t.Errorf("退避期应随 ctx 立即中止，实际耗时 %v", elapsed)
+	}
+	if got := readAttemptCount(t, countFile); got != 1 {
+		t.Errorf("退避期被取消不应发起第 2 次调用，实际 %d 次", got)
+	}
+}

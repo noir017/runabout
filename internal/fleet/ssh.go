@@ -9,11 +9,19 @@ import (
 	"time"
 )
 
+// defaultKeyRaceBackoffs 定义 OpenSSH 握手期遭遇公私钥瞬时不匹配时的退避序列，
+// 长度即最大自动重试次数。
+var defaultKeyRaceBackoffs = []time.Duration{
+	1500 * time.Millisecond,
+	2 * time.Second,
+}
+
 // SSH 通过本地 ssh 进程执行远端命令。审批不在 runabout 里实现：
 // 对这里来说，需要审批的机器只是"一条会阻塞一会儿的 ssh"。
 type SSH struct {
-	prefix  []string
-	baseEnv map[string]string
+	prefix          []string
+	baseEnv         map[string]string
+	keyRaceBackoffs []time.Duration
 }
 
 func NewSSH(prefix []string, shellEnv map[string]string) *SSH {
@@ -28,7 +36,11 @@ func NewSSH(prefix []string, shellEnv map[string]string) *SSH {
 	for k, v := range shellEnv {
 		base[k] = v
 	}
-	return &SSH{prefix: prefix, baseEnv: base}
+	return &SSH{
+		prefix:          prefix,
+		baseEnv:         base,
+		keyRaceBackoffs: defaultKeyRaceBackoffs,
+	}
 }
 
 func (s *SSH) command(ctx context.Context, spec Spec, merge bool) (*exec.Cmd, *CapWriter, *CapWriter, error) {
@@ -59,6 +71,22 @@ func (s *SSH) command(ctx context.Context, spec Spec, merge bool) (*exec.Cmd, *C
 }
 
 func (s *SSH) Run(ctx context.Context, spec Spec) (Result, error) {
+	totalStart := time.Now()
+	for attempt := 0; ; attempt++ {
+		res, err := s.runOnce(ctx, spec)
+		res.Duration = time.Since(totalStart)
+		if !shouldRetryKeyRace(ctx, res, err) || attempt >= len(s.keyRaceBackoffs) {
+			return res, err
+		}
+		if !sleepContext(ctx, s.keyRaceBackoffs[attempt]) {
+			res.Duration = time.Since(totalStart)
+			res.TimedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
+			return res, err
+		}
+	}
+}
+
+func (s *SSH) runOnce(ctx context.Context, spec Spec) (Result, error) {
 	cmd, out, errOut, err := s.command(ctx, spec, false)
 	if err != nil {
 		return Result{}, err
@@ -118,4 +146,37 @@ func looksLikeConnectError(stderr string) bool {
 		}
 	}
 	return false
+}
+
+// shouldRetryKeyRace 仅在确定尚未执行远端命令的握手阶段瞬时密钥竞态时允许重试：
+// 必须同时满足未超时/取消、识别为 ConnectError、退出码 255、无任何 stdout，
+// 且 stderr 明确包含 OpenSSH identity_sign 公私钥内容不匹配错误。
+func shouldRetryKeyRace(ctx context.Context, res Result, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	var ce *ConnectError
+	if !errors.As(err, &ce) {
+		return false
+	}
+	return res.ExitCode == 255 && res.Stdout == "" && looksLikeTransientKeyRace(res.Stderr)
+}
+
+func looksLikeTransientKeyRace(stderr string) bool {
+	return strings.Contains(stderr, "identity_sign:") &&
+		strings.Contains(stderr, "contents do not match public")
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
