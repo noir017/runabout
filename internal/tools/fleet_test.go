@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -395,6 +397,134 @@ func TestServersCache(t *testing.T) {
 	now = now.Add(31 * time.Second)
 	if out, _ := call(t, tool, nil); strings.Contains(out, "复用") {
 		t.Errorf("超过 30 秒应重新探测: %s", out)
+	}
+}
+
+func TestServersSingleflightAndConcurrencyLimit(t *testing.T) {
+	tmp := t.TempDir()
+	logFile := filepath.Join(tmp, "probes.log")
+	lockDir := filepath.Join(tmp, "inflight")
+	peakFile := filepath.Join(tmp, "peak.log")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(tmp, "slow-ssh")
+	script := `#!/bin/sh
+host="$1"
+printf '%s\n' "$host" >> "$STUB_LOG"
+marker="$LOCK_DIR/$host.$$"
+: > "$marker"
+cnt=$(ls -1 "$LOCK_DIR" | wc -l)
+printf '%s\n' "$cnt" >> "$PEAK_LOG"
+sleep 0.15
+rm -f "$marker"
+printf 'host=%s\nload=0.10 0.20 0.30\nmem=20\ndisk=1/10 10%%\n' "$host"
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hosts := make([]config.FleetHost, 6)
+	for i := range hosts {
+		hosts[i] = config.FleetHost{Name: fmt.Sprintf("node%d", i+1), Desc: "测试机"}
+	}
+	d, _ := newFleetDeps(t, config.Fleet{Hosts: hosts})
+	d.Cfg.Tools.Shell.Env = map[string]string{
+		"STUB_LOG": logFile,
+		"LOCK_DIR": lockDir,
+		"PEAK_LOG": peakFile,
+	}
+	d.Fleet = fleet.New(config.Fleet{
+		SSHCommand: []string{scriptPath},
+		Hosts:      hosts,
+	}, d.Cfg.Tools.Shell.Path, d.Cfg.Tools.Shell.Env)
+
+	tool := &serversTool{d: d, maxConc: 2}
+
+	const callers = 3
+	var wg sync.WaitGroup
+	results := make([]string, callers)
+	errs := make([]bool, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx], errs[idx] = call(t, tool, nil)
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < callers; i++ {
+		if errs[i] {
+			t.Fatalf("caller %d 失败: %s", i, results[i])
+		}
+		for _, h := range hosts {
+			if !strings.Contains(results[i], "["+h.Name+"] 在线") {
+				t.Errorf("caller %d 缺少在线结果 %s:\n%s", i, h.Name, results[i])
+			}
+		}
+	}
+	rawLog, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("读取日志失败: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(rawLog)), "\n")
+	if len(lines) != len(hosts) {
+		t.Fatalf("3 路并发应合并为每台仅探测 1 次（共 %d 次），实际 %d 次:\n%s", len(hosts), len(lines), string(rawLog))
+	}
+	rawPeak, err := os.ReadFile(peakFile)
+	if err != nil {
+		t.Fatalf("读取并发峰值失败: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(rawPeak)), "\n") {
+		var n int
+		if _, err := fmt.Sscanf(strings.TrimSpace(line), "%d", &n); err == nil && n > 2 {
+			t.Errorf("并发探测数超过上限 2: 实际峰值 %d", n)
+		}
+	}
+}
+
+func TestServersOfflineShortCacheTTL(t *testing.T) {
+	tmp := t.TempDir()
+	flag := filepath.Join(tmp, "ok")
+	scriptPath := filepath.Join(tmp, "flaky-ssh")
+	script := `#!/bin/sh
+if [ -f "$OK_FLAG" ]; then
+  printf 'host=web1\nload=0.10 0.20 0.30\nmem=15\ndisk=1/10 10%%\n'
+  exit 0
+fi
+printf 'connection timed out\n' >&2
+exit 255
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := newFleetDeps(t, config.Fleet{
+		Hosts: []config.FleetHost{{Name: "web1", Desc: "测试机"}},
+	})
+	d.Cfg.Tools.Shell.Env = map[string]string{"OK_FLAG": flag}
+	d.Fleet = fleet.New(config.Fleet{
+		SSHCommand: []string{scriptPath},
+		Hosts:      []config.FleetHost{{Name: "web1", Desc: "测试机"}},
+	}, d.Cfg.Tools.Shell.Path, d.Cfg.Tools.Shell.Env)
+
+	now := time.Now()
+	tool := &serversTool{d: d, now: func() time.Time { return now }}
+
+	if out, _ := call(t, tool, nil); !strings.Contains(out, "连不上") {
+		t.Fatalf("首次应返回离线: %s", out)
+	}
+	if err := os.WriteFile(flag, []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 5 秒内命中短缓存，避免瞬时重试风暴。
+	now = now.Add(2 * time.Second)
+	if out, _ := call(t, tool, nil); !strings.Contains(out, "连不上") || !strings.Contains(out, "复用") {
+		t.Fatalf("2 秒内应复用短缓存: %s", out)
+	}
+	// 超过 5 秒（未满 30 秒）应重新探测并恢复在线。
+	now = now.Add(4 * time.Second)
+	if out, _ := call(t, tool, nil); !strings.Contains(out, "[web1] 在线") {
+		t.Fatalf("超过 5 秒应重新探测并恢复在线: %s", out)
 	}
 }
 

@@ -35,18 +35,39 @@ printf '\n## 失败的 systemd 单元\n'
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then systemctl --failed --no-legend --no-pager 2>&1 | head -n 50; else printf '无 systemd\n'; fi
 `
 
+const (
+	defaultProbeConcurrency = 4
+	probeCacheTTL           = 30 * time.Second
+	probeFailCacheTTL       = 5 * time.Second
+)
+
 type serversTool struct {
 	d *Deps
 
-	mu    sync.Mutex
-	cache map[string]cachedHost
+	mu       sync.Mutex
+	cache    map[string]cachedHost
+	inflight map[string]*probeCall
+	sem      chan struct{}
+	maxConc  int
 
 	now func() time.Time
+}
+
+type probeCall struct {
+	done   chan struct{}
+	status hostStatus
 }
 
 type cachedHost struct {
 	at     time.Time
 	status hostStatus
+}
+
+func probeTTLFor(st hostStatus) time.Duration {
+	if st.State == "offline" {
+		return probeFailCacheTTL
+	}
+	return probeCacheTTL
 }
 
 type serversArgs struct {
@@ -118,40 +139,84 @@ func (t *serversTool) overview(cc *mcp.CallContext) (*mcp.CallToolResult, error)
 	}
 	now := t.clock()
 	statuses := make([]hostStatus, len(hosts))
-	needProbe := make([]int, 0, len(hosts))
+	type probeTask struct {
+		idx  int
+		host fleet.Host
+		call *probeCall
+	}
+	toProbe := make([]probeTask, 0, len(hosts))
+	toWait := make([]probeTask, 0, len(hosts))
 	allCached := true
+
 	t.mu.Lock()
-	for i, h := range hosts {
-		if entry, ok := t.cache[h.Name]; ok && now.Sub(entry.at) < 30*time.Second {
-			statuses[i] = entry.status
-		} else {
-			allCached = false
-			needProbe = append(needProbe, i)
+	if t.sem == nil {
+		n := t.maxConc
+		if n <= 0 {
+			n = defaultProbeConcurrency
 		}
+		t.sem = make(chan struct{}, n)
+	}
+	sem := t.sem
+	if t.inflight == nil {
+		t.inflight = map[string]*probeCall{}
+	}
+	for i, h := range hosts {
+		if entry, ok := t.cache[h.Name]; ok && now.Sub(entry.at) < probeTTLFor(entry.status) {
+			statuses[i] = entry.status
+			continue
+		}
+		allCached = false
+		if fc, ok := t.inflight[h.Name]; ok {
+			toWait = append(toWait, probeTask{idx: i, host: h, call: fc})
+			continue
+		}
+		fc := &probeCall{done: make(chan struct{})}
+		t.inflight[h.Name] = fc
+		toProbe = append(toProbe, probeTask{idx: i, host: h, call: fc})
 	}
 	t.mu.Unlock()
 	if allCached {
 		return t.renderOverview(statuses, true), nil
 	}
 
+	probeCtx := context.WithoutCancel(cc.Ctx)
 	var wg sync.WaitGroup
-	for _, idx := range needProbe {
+	for _, task := range toProbe {
 		wg.Add(1)
-		go func(i int, h fleet.Host) {
+		go func(task probeTask) {
 			defer wg.Done()
-			statuses[i] = t.probeHost(cc.Ctx, h)
-		}(idx, hosts[idx])
+			sem <- struct{}{}
+			st := t.probeHost(probeCtx, task.host)
+			<-sem
+
+			t.mu.Lock()
+			if t.cache == nil {
+				t.cache = map[string]cachedHost{}
+			}
+			t.cache[task.host.Name] = cachedHost{at: t.clock(), status: st}
+			if t.inflight[task.host.Name] == task.call {
+				delete(t.inflight, task.host.Name)
+			}
+			task.call.status = st
+			close(task.call.done)
+			t.mu.Unlock()
+
+			statuses[task.idx] = st
+		}(task)
+	}
+	for _, task := range toWait {
+		wg.Add(1)
+		go func(task probeTask) {
+			defer wg.Done()
+			select {
+			case <-task.call.done:
+				statuses[task.idx] = task.call.status
+			case <-cc.Ctx.Done():
+				statuses[task.idx] = hostStatus{Target: task.host.Name, State: "offline", Err: cc.Ctx.Err().Error()}
+			}
+		}(task)
 	}
 	wg.Wait()
-
-	t.mu.Lock()
-	if t.cache == nil {
-		t.cache = map[string]cachedHost{}
-	}
-	for _, idx := range needProbe {
-		t.cache[hosts[idx].Name] = cachedHost{at: now, status: statuses[idx]}
-	}
-	t.mu.Unlock()
 	return t.renderOverview(statuses, false), nil
 }
 
