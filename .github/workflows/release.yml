@@ -1,0 +1,54 @@
+# 推送 v* 标签时编译 linux amd64 / arm64 二进制，发布到 GitHub Release。
+#
+# 发版：
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# 产物（直接是可执行文件，不打包）：
+#   runabout-linux-amd64、runabout-linux-arm64、SHA256SUMS
+# 下载方按 SHA256SUMS 校验后放进 PATH 即可；uniagent 的 ua-tools 就是这么装的。
+# 纯 Go、CGO_ENABLED=0，交叉编译即可，不需要分架构 runner。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X github.com/noir017/runabout/internal/app.Version=${VERSION}" \
+              -o "dist/runabout-linux-${arch}" ./cmd/runabout
+          done
+          cd dist && sha256sum runabout-linux-* > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag
