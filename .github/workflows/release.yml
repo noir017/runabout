@@ -1,7 +1,7 @@
 # 推送 v* 标签时编译 linux amd64 / arm64 二进制，发布到 GitHub Release。
 #
 # 发版：
-#   git tag v0.2.0 && git push origin v0.2.0
+#   git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
 #
 # 产物（直接是可执行文件，不打包）：
 #   runabout-linux-amd64、runabout-linux-arm64、SHA256SUMS
@@ -30,6 +30,10 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+
+      # 测试里远端搜索默认用 rg（镜像里有），runner 上没有就补装。
+      - name: Install ripgrep
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
 
       - name: Test
         run: go test ./...
