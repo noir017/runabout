@@ -347,6 +347,69 @@ func TestFleetExposeLocalAndDefaultTarget(t *testing.T) {
 	})
 }
 
+func TestFleetLocalName(t *testing.T) {
+	t.Run("默认本机名是 local", func(t *testing.T) {
+		cfg := Default()
+		cfg.Auth.Enabled = false
+		cfg.Fleet.Hosts = []FleetHost{{Name: "web1"}}
+		if err := cfg.Normalize(); err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.Fleet.LocalTargetName(); got != "local" {
+			t.Errorf("默认本机名应为 local，得到 %q", got)
+		}
+	})
+
+	t.Run("local 作为别名换成本机名", func(t *testing.T) {
+		cfg := Default()
+		cfg.Auth.StaticTokens = []StaticToken{{Name: "t", Token: "x", AllowedTargets: []string{"local", "web1"}}}
+		cfg.Fleet.LocalName = " box "
+		cfg.Fleet.DefaultTarget = "local"
+		cfg.Fleet.Hosts = []FleetHost{{Name: "web1"}}
+		cfg.Policy.TargetDenyPaths = map[string][]string{"local": {"/secret/**"}}
+		if err := cfg.Normalize(); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Fleet.LocalName != "box" || cfg.Fleet.DefaultTarget != "box" {
+			t.Errorf("本机名与默认目标应规范为 box: %q %q", cfg.Fleet.LocalName, cfg.Fleet.DefaultTarget)
+		}
+		if got := cfg.Auth.StaticTokens[0].AllowedTargets; len(got) != 2 || got[0] != "box" || got[1] != "web1" {
+			t.Errorf("allowed_targets 里的 local 应换成 box: %v", got)
+		}
+		if _, ok := cfg.Policy.TargetDenyPaths["local"]; ok || len(cfg.Policy.TargetDenyPaths["box"]) != 1 {
+			t.Errorf("target_deny_paths 的 local 应并到 box 下: %v", cfg.Policy.TargetDenyPaths)
+		}
+		if cfg.Extensions.Skill.Target != "box" || cfg.Extensions.FleetherdTask.Target != "box" {
+			t.Errorf("扩展的默认目标应为本机名: %q %q", cfg.Extensions.Skill.Target, cfg.Extensions.FleetherdTask.Target)
+		}
+	})
+
+	t.Run("远端机器不能占用本机名或 local", func(t *testing.T) {
+		for _, name := range []string{"box", "local"} {
+			cfg := Default()
+			cfg.Auth.Enabled = false
+			cfg.Fleet.LocalName = "box"
+			cfg.Fleet.Hosts = []FleetHost{{Name: name}}
+			if err := cfg.Normalize(); err == nil {
+				t.Errorf("hosts 里用 %q 应报错", name)
+			}
+		}
+	})
+
+	t.Run("不暴露本机时 default_target 不能指向本机名", func(t *testing.T) {
+		noLocal := false
+		cfg := Default()
+		cfg.Auth.Enabled = false
+		cfg.Fleet.ExposeLocal = &noLocal
+		cfg.Fleet.LocalName = "box"
+		cfg.Fleet.DefaultTarget = "box"
+		cfg.Fleet.Hosts = []FleetHost{{Name: "web1"}}
+		if err := cfg.Normalize(); err == nil {
+			t.Fatal("expose_local=false 时 default_target 不能是本机")
+		}
+	})
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0)
 }

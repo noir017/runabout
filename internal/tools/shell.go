@@ -38,8 +38,8 @@ func (t *shellTool) DefinitionFor(p mcp.Principal) mcp.ToolDef {
 	if t.d.fleetEnabled() {
 		var head string
 		switch def := t.d.defaultTargetFor(p); def {
-		case fleet.LocalTarget:
-			head = "\ntarget 决定在哪台机器上执行，默认 local（runabout 所在容器）。"
+		case t.d.fleetOrLocal().LocalName():
+			head = fmt.Sprintf("\ntarget 决定在哪台机器上执行，默认 %s（runabout 所在的机器，本机直接执行）。", def)
 		case "":
 			head = "\ntarget 必填，决定在哪台机器上执行。"
 		default:

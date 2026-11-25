@@ -159,6 +159,11 @@ fleet:
   # 可再配 default_target 指定默认远端机；留空则每次调用必须显式传 target。
   # expose_local: false
   # default_target: "web1"
+  #
+  # 本机在 target 里默认叫 local。runabout 直接装在某台机器上、客户端原来经 ssh 操作这台
+  # 机器时，用 local_name 沿用原来的名字，客户端写的 target 不用改；local 仍是本机的别名。
+  # local_name: "box"
+  # local_desc: "开发机"
   ssh_command: ["ssh", "-o", "BatchMode=yes"]
   # servers 总览里单台机器的探测超时。
   probe_timeout: 10s

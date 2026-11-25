@@ -81,7 +81,9 @@ fleet:
       approval: true
 ```
 
-Each host can set `workdir`; relative paths on that host resolve there, and without it they resolve to the remote user's home. With `hosts` non-empty, `servers` is added and `shell`, `read`, `search`, `glob`, `apply_patch` gain a `target` parameter whose enum lists the machines plus `local`. Without it, no `target` appears and behavior matches the single-machine version, with two intentional differences: `shell` no longer duplicates stdout/stderr in `structuredContent`, and `read`, `search`, `glob` now carry complete read-only annotations. `servers` probes all hosts in parallel (30-second cache) or returns one host's snapshot.
+Each host can set `workdir`; relative paths on that host resolve there, and without it they resolve to the remote user's home. With `hosts` non-empty, `servers` is added and `shell`, `read`, `search`, `glob`, `apply_patch` gain a `target` parameter whose enum lists the machines plus the local host. Without it, no `target` appears and behavior matches the single-machine version, with two intentional differences: `shell` no longer duplicates stdout/stderr in `structuredContent`, and `read`, `search`, `glob` now carry complete read-only annotations. `servers` probes all hosts in parallel (30-second cache) or returns one host's snapshot.
+
+The local host is called `local` in `target` by default. When runabout is installed directly on a machine that clients used to reach over ssh, set `local_name` to that machine's name (and `local_desc` for its `servers` description) so clients keep using the same `target`; `local` stays accepted as an alias, including where the config says `local` (`default_target`, `allowed_targets`, `target_deny_paths`, extension `target`).
 
 Hosts marked `approval: true` are probed only when `approval_check` exits 0; otherwise they show as needing approval. runabout does not implement approval — the ssh layer blocks until the user approves.
 
@@ -242,7 +244,7 @@ OAuth state and audit data live in the `mcp-data` volume. Do not expose that vol
 
 ## Bare-metal systemd
 
-`deploy/runabout.service` provides a systemd unit. A typical installation is:
+`deploy/runabout.service` provides a systemd unit. Prebuilt linux amd64 / arm64 binaries with `SHA256SUMS` are on [Releases](https://github.com/noir017/runabout/releases). A typical installation is:
 
 ```text
 /usr/local/bin/runabout

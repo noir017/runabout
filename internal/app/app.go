@@ -59,8 +59,8 @@ func serverInstructions(f *fleet.Fleet) string {
 		return singleInstructions
 	}
 	switch def := f.DefaultTarget(); def {
-	case fleet.LocalTarget:
-		return fleetInstructions + "\n\n文件工具也有 target，默认 local（runabout 所在容器）。"
+	case f.LocalName():
+		return fmt.Sprintf("%s\n\n文件工具也有 target，默认 %s（runabout 所在的机器，本机直接执行）。", fleetInstructions, def)
 	case "":
 		return fleetInstructions + "\n\n所有命令与文件工具都必须显式指定 target。"
 	default:

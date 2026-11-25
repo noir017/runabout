@@ -83,7 +83,9 @@ fleet:
       approval: true
 ```
 
-每台机器可以配 `workdir`，相对路径按它解析；不配就是远端登录用户的家目录。配了 `hosts` 之后会加上 `servers`，`shell`、`read`、`search`、`glob`、`apply_patch` 都会多一个 `target` 参数，enum 列出全部机器名和 `local`；不配时没有 `target`，行为和单机版有两处有意差异：`shell` 的 `structuredContent` 不再重复放 stdout 和 stderr；`read`、`search`、`glob` 补全了只读 annotations。`servers` 会并行探测所有机器（结果缓存 30 秒），带 `target` 时返回单台详情。
+每台机器可以配 `workdir`，相对路径按它解析；不配就是远端登录用户的家目录。配了 `hosts` 之后会加上 `servers`，`shell`、`read`、`search`、`glob`、`apply_patch` 都会多一个 `target` 参数，enum 列出全部机器名和本机；不配时没有 `target`，行为和单机版有两处有意差异：`shell` 的 `structuredContent` 不再重复放 stdout 和 stderr；`read`、`search`、`glob` 补全了只读 annotations。`servers` 会并行探测所有机器（结果缓存 30 秒），带 `target` 时返回单台详情。
+
+本机在 `target` 里默认叫 `local`。runabout 直接装在某台机器上、而客户端原来是经 ssh 操作这台机器时，可以用 `local_name` 沿用原来的名字（`local_desc` 是它在 `servers` 里的说明），客户端写的 `target` 不用改；`local` 仍作为本机的别名被接受，配置里写 `local` 的地方（`default_target`、`allowed_targets`、`target_deny_paths`、扩展的 `target`）也一样。
 
 标了 `approval: true` 的机器只有在 `approval_check` 退出 0 时才探测，否则显示"需审批"。runabout 不实现审批，审批由 ssh 层阻塞等待。
 
@@ -297,7 +299,7 @@ OAuth 状态和审计数据存储在 `mcp-data` Volume 中：
 deploy/runabout.service
 ```
 
-安装二进制到：
+安装二进制到（[Releases](https://github.com/noir017/runabout/releases) 有 linux amd64 / arm64 的预编译二进制和 `SHA256SUMS`）：
 
 ```text
 /usr/local/bin/runabout

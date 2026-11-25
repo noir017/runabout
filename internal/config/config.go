@@ -112,8 +112,14 @@ type Fleet struct {
 	// 留空默认 true（兼容单机模式与旧配置）；设为 false 时要求至少配置一台远端主机，
 	// local 不会出现在 target 枚举与 servers 列表中，纯远端网关模式也不依赖本机 bash。
 	ExposeLocal *bool `yaml:"expose_local,omitempty"`
+	// LocalName 是本机在 target 枚举与 servers 里的名字，留空为 local。
+	// runabout 直接装在某台机器上时，可以用那台机器自己的名字（例如 uniagent），
+	// 客户端原来写的 target 不用改；local 仍作为它的别名被接受。
+	LocalName string `yaml:"local_name,omitempty"`
+	// LocalDesc 是本机在 servers 里的用途说明，留空用内置说明。
+	LocalDesc string `yaml:"local_desc,omitempty"`
 	// DefaultTarget 指定省略 target 参数时的默认目标机器。
-	// 留空时：ExposeLocal 为 true 则默认 local；ExposeLocal 为 false 则 target 为必填参数。
+	// 留空时：ExposeLocal 为 true 则默认本机；ExposeLocal 为 false 则 target 为必填参数。
 	DefaultTarget string `yaml:"default_target,omitempty"`
 	// SSHCommand 是远端调用的前缀，后面依次追加 <主机> <命令>。
 	SSHCommand []string `yaml:"ssh_command"`
@@ -131,6 +137,23 @@ func (f Fleet) LocalExposed() bool {
 		return true
 	}
 	return *f.ExposeLocal
+}
+
+// LocalTargetName 返回本机的 target 名：配置了 local_name 用它，否则是 local。
+func (f Fleet) LocalTargetName() string {
+	if n := strings.TrimSpace(f.LocalName); n != "" {
+		return n
+	}
+	return "local"
+}
+
+// CanonTarget 把 target 别名 local 换成本机的实际名字，其余原样返回。
+func (f Fleet) CanonTarget(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "local" {
+		return f.LocalTargetName()
+	}
+	return name
 }
 
 // FleetHost 是一台远端机器。
@@ -571,10 +594,14 @@ func (c *Config) normalizeFleet() error {
 	if !f.LocalExposed() && len(f.Hosts) == 0 {
 		return fmt.Errorf("fleet.expose_local 为 false 时必须至少配置一台 fleet.hosts")
 	}
-	seen := map[string]bool{"local": true}
+	f.LocalName = strings.TrimSpace(f.LocalName)
+	f.LocalDesc = strings.TrimSpace(f.LocalDesc)
+	localName := f.LocalTargetName()
+	// local 永远保留：它是本机的别名，哪怕本机改了名字。
+	seen := map[string]bool{"local": true, localName: true}
 	validTargets := map[string]bool{}
 	if f.LocalExposed() {
-		validTargets["local"] = true
+		validTargets[localName] = true
 	}
 	for i := range f.Hosts {
 		h := &f.Hosts[i]
@@ -582,8 +609,8 @@ func (c *Config) normalizeFleet() error {
 		if h.Name == "" {
 			return fmt.Errorf("fleet.hosts[%d].name 不能为空", i)
 		}
-		if h.Name == "local" {
-			return fmt.Errorf("fleet.hosts 里不能用保留名 %q", h.Name)
+		if h.Name == "local" || h.Name == localName {
+			return fmt.Errorf("fleet.hosts 里不能用本机的名字 %q（本机见 fleet.local_name）", h.Name)
 		}
 		if seen[h.Name] {
 			return fmt.Errorf("fleet.hosts 里的机器名 %q 重复", h.Name)
@@ -604,14 +631,19 @@ func (c *Config) normalizeFleet() error {
 			c.Policy.TargetDenyPaths[h.Name] = append(c.Policy.TargetDenyPaths[h.Name], h.DenyPaths...)
 		}
 	}
-	f.DefaultTarget = strings.TrimSpace(f.DefaultTarget)
+	f.DefaultTarget = f.CanonTarget(f.DefaultTarget)
 	if f.DefaultTarget != "" {
-		if f.DefaultTarget == "local" && !f.LocalExposed() {
-			return fmt.Errorf("fleet.expose_local 为 false 时不能将 fleet.default_target 设为 %q", f.DefaultTarget)
+		if f.DefaultTarget == localName && !f.LocalExposed() {
+			return fmt.Errorf("fleet.expose_local 为 false 时不能将 fleet.default_target 设为本机 %q", f.DefaultTarget)
 		}
 		if !validTargets[f.DefaultTarget] {
 			return fmt.Errorf("fleet.default_target %q 不在可用目标列表中", f.DefaultTarget)
 		}
+	}
+	// 按本机别名 local 写的机器专属黑名单，并到本机的实际名字下。
+	if pats, ok := c.Policy.TargetDenyPaths["local"]; ok && localName != "local" {
+		delete(c.Policy.TargetDenyPaths, "local")
+		c.Policy.TargetDenyPaths[localName] = append(c.Policy.TargetDenyPaths[localName], pats...)
 	}
 	return nil
 }
@@ -620,7 +652,7 @@ func (c *Config) normalizeFleet() error {
 func (c *Config) normalizeAuthPolicies() error {
 	known := map[string]bool{}
 	if c.Fleet.LocalExposed() {
-		known["local"] = true
+		known[c.Fleet.LocalTargetName()] = true
 	}
 	for _, h := range c.Fleet.Hosts {
 		known[h.Name] = true
@@ -632,7 +664,7 @@ func (c *Config) normalizeAuthPolicies() error {
 		out := make([]string, 0, len(list))
 		seen := map[string]bool{}
 		for _, raw := range list {
-			t := strings.TrimSpace(raw)
+			t := c.Fleet.CanonTarget(raw)
 			if t == "" {
 				continue
 			}
@@ -671,15 +703,16 @@ func (c *Config) normalizeAuthPolicies() error {
 
 // normalizeExtensions 补齐扩展工具默认值，并在启用时校验目标机器与安全黑名单。
 func (c *Config) normalizeExtensions() error {
-	known := map[string]bool{"local": true}
+	localName := c.Fleet.LocalTargetName()
+	known := map[string]bool{localName: true}
 	for _, h := range c.Fleet.Hosts {
 		known[h.Name] = true
 	}
 
 	sk := &c.Extensions.Skill
-	sk.Target = strings.TrimSpace(sk.Target)
+	sk.Target = c.Fleet.CanonTarget(sk.Target)
 	if sk.Target == "" {
-		sk.Target = "local"
+		sk.Target = localName
 	}
 	sk.Binary = strings.TrimSpace(sk.Binary)
 	if sk.Binary == "" {
@@ -696,9 +729,9 @@ func (c *Config) normalizeExtensions() error {
 	}
 
 	ft := &c.Extensions.FleetherdTask
-	ft.Target = strings.TrimSpace(ft.Target)
+	ft.Target = c.Fleet.CanonTarget(ft.Target)
 	if ft.Target == "" {
-		ft.Target = "local"
+		ft.Target = localName
 	}
 	ft.Binary = strings.TrimSpace(ft.Binary)
 	if ft.Binary == "" {

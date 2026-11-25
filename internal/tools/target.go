@@ -92,9 +92,10 @@ func (d *Deps) defaultTargetFor(p mcp.Principal) string {
 	return def
 }
 
-// localUsableFor 报告指定身份能否把本机（local）当目标：本机已暴露且在该身份的白名单内。
+// localUsableFor 报告指定身份能否把本机当目标：本机已暴露且在该身份的白名单内。
 func (d *Deps) localUsableFor(p mcp.Principal) bool {
-	return d.fleetOrLocal().ExposeLocal() && p.AllowsTarget(fleet.LocalTarget)
+	f := d.fleetOrLocal()
+	return f.ExposeLocal() && p.AllowsTarget(f.LocalName())
 }
 
 // workdirDocFor 描述省略 workdir 时的默认工作目录，只提该身份实际能用到的那部分：

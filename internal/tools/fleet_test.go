@@ -643,6 +643,47 @@ func TestTargetParamIsSimpleEnum(t *testing.T) {
 	}
 }
 
+func TestFleetLocalNameTools(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "ssh.log")
+	d, _ := newFleetDepsEnv(t, config.Fleet{LocalName: "box", LocalDesc: "开发机"}, map[string]string{"STUB_LOG": log})
+
+	def := (&shellTool{d: d}).Definition()
+	props := def.InputSchema.(map[string]any)["properties"].(map[string]any)
+	enum := props["target"].(map[string]any)["enum"].([]string)
+	if len(enum) != 2 || enum[0] != "box" || enum[1] != "web1" {
+		t.Fatalf("本机应以 box 出现在 enum 第一位: %v", enum)
+	}
+	if !strings.Contains(def.Description, "默认 box（runabout 所在的机器") {
+		t.Errorf("shell 描述应说明默认目标是本机 box: %s", def.Description)
+	}
+	sDesc := (&serversTool{d: d}).Definition().InputSchema.(map[string]any)["properties"].(map[string]any)["target"].(map[string]any)["description"].(string)
+	if !strings.Contains(sDesc, "box：开发机") {
+		t.Errorf("servers 应列出本机名与说明: %s", sDesc)
+	}
+
+	// 显式写本机名、写别名 local、省略 target，都在本机直接执行（不经 ssh）。
+	for _, target := range []string{"box", "local", ""} {
+		args := map[string]any{"command": "echo here-$((1+1))"}
+		if target != "" {
+			args["target"] = target
+		}
+		out, isErr := call(t, &shellTool{d: d}, args)
+		if isErr || !strings.Contains(out, "[box] exit=0") || !strings.Contains(out, "here-2") {
+			t.Errorf("target=%q 应在本机 box 执行: %s", target, out)
+		}
+	}
+	if _, err := os.Stat(log); err == nil {
+		t.Error("本机目标不应经过 ssh")
+	}
+	// 对照：远端目标确实经过 ssh 桩，上面的断言才有意义。
+	if out, isErr := call(t, &shellTool{d: d}, map[string]any{"target": "web1", "command": "true"}); isErr {
+		t.Fatalf("远端命令不应失败: %s", out)
+	}
+	if _, err := os.Stat(log); err != nil {
+		t.Error("远端目标应经过 ssh 桩")
+	}
+}
+
 func TestFleetExposeLocalFalseTools(t *testing.T) {
 	noLocal := false
 

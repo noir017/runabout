@@ -15,8 +15,11 @@ import (
 	"github.com/noir017/runabout/internal/config"
 )
 
-// LocalTarget 是本机的保留名，指 runabout 所在的容器。
+// LocalTarget 是本机的默认名字，也是本机永远有效的别名（fleet.local_name 改了名字时同样认）。
 const LocalTarget = "local"
+
+// defaultLocalDesc 是没配 fleet.local_desc 时本机在 servers 里的说明。
+const defaultLocalDesc = "runabout 所在的机器（本机直接执行，不经 ssh）"
 
 // Host 是一台可操作的机器。本机也会以 Host 的形式出现在列表里。
 type Host struct {
@@ -80,6 +83,7 @@ type Fleet struct {
 	hosts         []Host
 	byName        map[string]Host
 	exposeLocal   bool
+	localName     string
 	defaultTarget string
 	probeTimeout  time.Duration
 	approvalCheck string
@@ -90,13 +94,15 @@ type Fleet struct {
 // New 构造机群。cfg 为空时只有 local 一台，Enabled 返回 false。
 func New(cfg config.Fleet, shellPath string, shellEnv map[string]string) *Fleet {
 	exposeLocal := cfg.LocalExposed()
-	defaultTarget := strings.TrimSpace(cfg.DefaultTarget)
+	localName := cfg.LocalTargetName()
+	defaultTarget := cfg.CanonTarget(cfg.DefaultTarget)
 	if defaultTarget == "" && exposeLocal {
-		defaultTarget = LocalTarget
+		defaultTarget = localName
 	}
 	f := &Fleet{
 		byName:        map[string]Host{},
 		exposeLocal:   exposeLocal,
+		localName:     localName,
 		defaultTarget: defaultTarget,
 		probeTimeout:  cfg.ProbeTimeout,
 		approvalCheck: cfg.ApprovalCheck,
@@ -107,7 +113,11 @@ func New(cfg config.Fleet, shellPath string, shellEnv map[string]string) *Fleet 
 		f.probeTimeout = 10 * time.Second
 	}
 	if exposeLocal {
-		local := Host{Name: LocalTarget, Desc: "runabout 所在的容器", Local: true}
+		desc := strings.TrimSpace(cfg.LocalDesc)
+		if desc == "" {
+			desc = defaultLocalDesc
+		}
+		local := Host{Name: localName, Desc: desc, Local: true}
 		f.hosts = append(f.hosts, local)
 		f.byName[local.Name] = local
 	}
@@ -132,8 +142,11 @@ func (f *Fleet) Enabled() bool {
 	return false
 }
 
-// ExposeLocal 报告是否暴露本机（local）作为可操作目标。
+// ExposeLocal 报告是否暴露本机作为可操作目标。
 func (f *Fleet) ExposeLocal() bool { return f.exposeLocal }
+
+// LocalName 返回本机的 target 名（fleet.local_name，默认 local）。
+func (f *Fleet) LocalName() string { return f.localName }
 
 // DefaultTarget 返回省略 target 时的默认目标名；为空表示必须显式指定。
 func (f *Fleet) DefaultTarget() string { return f.defaultTarget }
@@ -149,6 +162,9 @@ func (f *Fleet) Lookup(name string) (Host, bool) {
 			return Host{}, false
 		}
 		name = f.defaultTarget
+	}
+	if name == LocalTarget && f.exposeLocal {
+		name = f.localName
 	}
 	h, ok := f.byName[name]
 	return h, ok

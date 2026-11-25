@@ -280,7 +280,7 @@ func (t *serversTool) probeHost(ctx context.Context, h fleet.Host) hostStatus {
 
 func (t *serversTool) renderOverview(statuses []hostStatus, cached bool) *mcp.CallToolResult {
 	var sb strings.Builder
-	if len(statuses) == 1 && statuses[0].Target == fleet.LocalTarget {
+	if len(statuses) == 1 && statuses[0].Target == t.d.fleetOrLocal().LocalName() {
 		sb.WriteString("本机")
 	} else {
 		fmt.Fprintf(&sb, "机群 %d 台", len(statuses))
