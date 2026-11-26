@@ -310,11 +310,20 @@ func withRequestLog(log *slog.Logger, next http.Handler) http.Handler {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		start := time.Now()
 		next.ServeHTTP(rec, r)
-		if r.URL.Path == "/healthz" {
+		durMs := time.Since(start).Milliseconds()
+		ctxErr := r.Context().Err()
+		if r.URL.Path == "/healthz" && rec.status < 400 && ctxErr == nil {
 			return
 		}
-		log.Debug("http", "method", r.Method, "path", logPath(r.URL.Path),
-			"status", rec.status, "dur_ms", time.Since(start).Milliseconds())
+		p := logPath(r.URL.Path)
+		switch {
+		case rec.status >= 400:
+			log.Warn("http 异常响应", "method", r.Method, "path", p, "status", rec.status, "dur_ms", durMs)
+		case ctxErr != nil && r.Method != http.MethodGet:
+			log.Warn("http 请求中止", "method", r.Method, "path", p, "status", rec.status, "dur_ms", durMs, "err", ctxErr)
+		default:
+			log.Debug("http", "method", r.Method, "path", p, "status", rec.status, "dur_ms", durMs)
+		}
 	})
 }
 

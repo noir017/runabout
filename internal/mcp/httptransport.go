@@ -30,6 +30,11 @@ type HTTPOptions struct {
 	SessionTTL     time.Duration
 	// StrictSessions 为 true 时，非 initialize 请求必须带合法 Mcp-Session-Id。
 	StrictSessions bool
+	// SSEKeepaliveDelay 是 POST 请求超过该耗时后切为 SSE 保活流的阈值，默认 15s；
+	// 仅在客户端 Accept 包含 text/event-stream 且含需响应的请求时生效，用于避免反代/CDN 首字节超时。
+	SSEKeepaliveDelay time.Duration
+	// SSEKeepaliveInterval 是 POST SSE 流的心跳注释帧发送间隔，默认 15s。
+	SSEKeepaliveInterval time.Duration
 	Log            *slog.Logger
 }
 
@@ -58,6 +63,12 @@ func NewHTTPTransport(srv *Server, opt HTTPOptions) *HTTPTransport {
 	}
 	if opt.SessionTTL <= 0 {
 		opt.SessionTTL = 2 * time.Hour
+	}
+	if opt.SSEKeepaliveDelay <= 0 {
+		opt.SSEKeepaliveDelay = 15 * time.Second
+	}
+	if opt.SSEKeepaliveInterval <= 0 {
+		opt.SSEKeepaliveInterval = 15 * time.Second
 	}
 	host := ""
 	if u, err := url.Parse(opt.BaseURL); err == nil {
@@ -175,6 +186,19 @@ func (t *HTTPTransport) handlePost(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set(headerProtoVer, sess.proto)
 
+	hasReq := false
+	for _, m := range msgs {
+		if !m.IsNotification() {
+			hasReq = true
+			break
+		}
+	}
+	flusher, canFlush := w.(http.Flusher)
+	if hasReq && !isInit && canFlush && strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+		t.handlePostStreaming(w, r, flusher, sess, msgs, batch)
+		return
+	}
+
 	responses := make([]*Response, 0, len(msgs))
 	for _, m := range msgs {
 		if resp := t.srv.Dispatch(r.Context(), sess.id, sess.proto, m); resp != nil {
@@ -191,6 +215,10 @@ func (t *HTTPTransport) handlePost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	writePostJSON(w, responses, batch)
+}
+
+func writePostJSON(w http.ResponseWriter, responses []*Response, batch bool) {
 	if len(responses) == 0 {
 		// 全是通知：规范要求 202 且无响应体。
 		w.WriteHeader(http.StatusAccepted)
@@ -201,6 +229,85 @@ func (t *HTTPTransport) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, responses[0])
+}
+
+// handlePostStreaming 在请求快速完成时照旧返回 application/json；
+// 一旦超过 SSEKeepaliveDelay 仍未完成，就切为 text/event-stream 并周期发送
+// SSE 注释心跳，防止中间反代或 CDN（如 100s 首字节超时）掐断长工具调用。
+func (t *HTTPTransport) handlePostStreaming(
+	w http.ResponseWriter, r *http.Request, flusher http.Flusher,
+	sess *session, msgs []*Message, batch bool,
+) {
+	done := make(chan []*Response, 1)
+	go func() {
+		responses := make([]*Response, 0, len(msgs))
+		for _, m := range msgs {
+			if resp := t.srv.Dispatch(r.Context(), sess.id, sess.proto, m); resp != nil {
+				responses = append(responses, resp)
+			}
+		}
+		done <- responses
+	}()
+
+	delay := time.NewTimer(t.opt.SSEKeepaliveDelay)
+	defer delay.Stop()
+	select {
+	case responses := <-done:
+		writePostJSON(w, responses, batch)
+		return
+	case <-r.Context().Done():
+		return
+	case <-delay.C:
+		select {
+		case responses := <-done:
+			writePostJSON(w, responses, batch)
+			return
+		default:
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	tick := time.NewTicker(t.opt.SSEKeepaliveInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case responses := <-done:
+			if len(responses) == 0 {
+				return
+			}
+			var payload any = responses[0]
+			if batch {
+				payload = responses
+			}
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				t.log.Warn("编码 SSE 响应失败", "err", err)
+				return
+			}
+			if _, err := fmt.Fprintf(w, "event: message\ndata: %s\n\n", raw); err != nil {
+				t.log.Warn("写 SSE 响应失败", "err", err)
+				return
+			}
+			flusher.Flush()
+			return
+		case <-r.Context().Done():
+			return
+		case <-tick.C:
+			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func initProto(m *Message) string {
